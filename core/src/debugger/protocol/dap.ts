@@ -85,35 +85,35 @@ export class DAPDebugger extends BaseDebugAdapter {
       throw new Error('Failed to initialize debug adapter streams')
     }
 
-    // Handle responses and events
+    // Handle responses and events using proper Content-Length framing.
+    // DAP spec says \r\n but vsdbg on macOS sends \n — handle both.
     this.debugProcess.stdout.setEncoding('utf-8')
     let buffer = ''
 
-    this.debugProcess.stdout.on('data', (chunk: Buffer) => {
-      buffer += chunk.toString()
+    this.debugProcess.stdout.on('data', (chunk: string) => {
+      buffer += chunk
 
-      // Parse multiple messages from buffer
-      const lines = buffer.split('\r\n')
-      buffer = lines[lines.length - 1] // Keep incomplete line in buffer
+      while (true) {
+        const headerMatch = buffer.match(/Content-Length: (\d+)\r?\n\r?\n/)
+        if (!headerMatch) break
 
-      for (let i = 0; i < lines.length - 1; i++) {
-        if (lines[i].startsWith('Content-Length:')) {
-          continue
-        }
-        if (lines[i].trim() === '') {
-          continue
-        }
+        const contentLength = parseInt(headerMatch[1], 10)
+        const bodyStart = headerMatch.index! + headerMatch[0].length
+
+        if (buffer.length < bodyStart + contentLength) break // wait for rest
+
+        const body = buffer.substring(bodyStart, bodyStart + contentLength)
+        buffer = buffer.substring(bodyStart + contentLength)
 
         try {
-          const message = JSON.parse(lines[i]) as DAPMessage
-
+          const message = JSON.parse(body) as DAPMessage
           if (message.type === 'response') {
             this.handleResponse(message as DAPResponse)
           } else if (message.type === 'event') {
             this.handleEvent(message as DAPEvent)
           }
         } catch (e) {
-          console.error('Failed to parse DAP message:', lines[i], e)
+          console.error('Failed to parse DAP message:', body, e)
         }
       }
     })
@@ -123,16 +123,20 @@ export class DAPDebugger extends BaseDebugAdapter {
       console.error('Debug adapter error:', chunk.toString())
     })
 
-    // Send initialize request
+    // Send initialize request — adapterID must be 'coreclr' for vsdbg
     await this.sendRequest('initialize', {
-      adapterID: 'generic-dap',
+      adapterID: 'coreclr',
       clientID: 'dev-tools',
       clientName: 'Dev Tools',
       linesStartAt1: true,
       columnsStartAt1: true,
       pathFormat: 'path',
       supportsVariableType: true,
-      supportsRunInTerminalRequest: false
+      supportsVariablePaging: true,
+      supportsRunInTerminalRequest: false,
+      supportsMemoryReferences: true,
+      supportsProgressReporting: true,
+      supportsInvalidatedEvent: true
     })
 
     // Send launch or attach request based on launchConfig.request
