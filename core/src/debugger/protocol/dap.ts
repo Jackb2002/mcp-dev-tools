@@ -123,6 +123,10 @@ export class DAPDebugger extends BaseDebugAdapter {
       console.error('Debug adapter error:', chunk.toString())
     })
 
+    // Register the 'initialized' listener BEFORE sending initialize — the
+    // event can arrive at any point during the handshake and must not be missed.
+    const initializedPromise = this.waitForEvent('initialized', 10000)
+
     // Send initialize request — adapterID must be 'coreclr' for vsdbg
     await this.sendRequest('initialize', {
       adapterID: 'coreclr',
@@ -143,10 +147,8 @@ export class DAPDebugger extends BaseDebugAdapter {
     const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
     await this.sendRequest(sessionType, this.launchConfig)
 
-    // Wait for the 'initialized' event — vsdbg emits this when it is ready
-    // to accept breakpoint configuration. Then send configurationDone to
-    // signal we are finished setting up and execution should resume.
-    await this.waitForEvent('initialized', 10000)
+    // Wait for 'initialized' (may have already resolved) then finish handshake
+    await initializedPromise
     await this.sendRequest('configurationDone', {})
   }
 
