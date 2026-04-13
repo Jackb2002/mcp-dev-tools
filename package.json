@@ -1,5 +1,5 @@
 {
-  "name": "comms-reporter-dev-tools",
+  "name": "mcp-dev-tools",
   "version": "0.1.0",
   "description": "Generic MCP server + VS extension for real-time development insights",
   "private": true,

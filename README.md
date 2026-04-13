@@ -14,7 +14,7 @@ A comprehensive development tools platform that provides real-time insights into
 ## Project Structure
 
 ```
-comms-reporter-dev-tools/
+mcp-dev-tools/
 ├── core/              # Shared library (logs, git, disk, build, app, db, debugger)
 ├── mcp-server/        # MCP server (exposes core via resources & tools)
 ├── vs-extension/      # Visual Studio extension (future)
