@@ -514,12 +514,14 @@ function initializeTools(): void {
   // Debugger status tool — always available, shows connection state
   tools.push({
     name: 'debugger_status',
-    description: 'Show debugger connection status, vsdbg path, and attached PID',
+    description: 'Show debugger connection status, adapter path, attached PID, thread map, and current stopped context',
     inputSchema: { type: 'object', properties: {} },
     handler: async () => {
       const config = CoreLib.getConfigManager().getConfig()
       const adapter = CoreLib.findDebugAdapter()
       const health = await CoreLib.getHealth(config.appPort)
+      const threads = debugger_?.getThreadMap()
+      const stopped = debugger_?.getStoppedContext()
       return JSON.stringify({
         connected: debugger_ !== null && debugger_.isRunning(),
         adapterKind: adapter?.kind ?? 'not found',
@@ -527,8 +529,119 @@ function initializeTools(): void {
         appRunning: health.running,
         appPid: health.pid ?? null,
         debuggerEnabled: config.debugger?.enabled ?? false,
-        lastError: debuggerLastError
+        lastError: debuggerLastError,
+        threadMap: threads ? Object.fromEntries(threads) : null,
+        stoppedContext: stopped ?? null
       }, null, 2)
+    }
+  })
+
+  // List live threads
+  tools.push({
+    name: 'debugger_threads',
+    description: 'List all active threads in the attached process with their IDs and names',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      if (!debugger_) return 'Debugger not connected'
+      try {
+        const threads = await debugger_.listThreads()
+        return JSON.stringify(threads, null, 2)
+      } catch (e) {
+        return `Error listing threads: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Get stack trace
+  tools.push({
+    name: 'debugger_stack_trace',
+    description: 'Get the current call stack (only works when paused at a breakpoint or after pause)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        threadId: { type: 'number', description: 'Thread ID (optional — defaults to stopped thread)' }
+      }
+    },
+    handler: async (args) => {
+      if (!debugger_) return 'Debugger not connected'
+      try {
+        const frames = await debugger_.getFullStackTrace(args.threadId as number | undefined)
+        return JSON.stringify(frames, null, 2)
+      } catch (e) {
+        return `Error getting stack: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // List loaded sources (diagnostic — shows what paths netcoredbg knows about)
+  tools.push({
+    name: 'debugger_loaded_sources',
+    description: 'List all source files loaded by the debug adapter — use this to diagnose breakpoint path mismatches',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      if (!debugger_) return 'Debugger not connected'
+      try {
+        const sources = await debugger_.getLoadedSources()
+        return JSON.stringify(sources, null, 2)
+      } catch (e) {
+        return `Error listing sources: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Reconnect debugger without restarting the MCP
+  tools.push({
+    name: 'debugger_reconnect',
+    description: 'Stop the current debug session and reattach to the running app — use after app restarts',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      const config = CoreLib.getConfigManager().getConfig()
+      try {
+        if (debugger_) {
+          try { await debugger_.stop() } catch { /* ignore stop errors */ }
+          debugger_ = null
+        }
+        const adapter = CoreLib.findDebugAdapter()
+        if (!adapter) return 'No debug adapter found'
+        const health = await CoreLib.getHealth(config.appPort)
+        if (!health.pid) return 'App not running — start the app first'
+        debugger_ = new CoreLib.DAPDebugger(adapter.path, {
+          request: 'attach',
+          processId: health.pid,
+          justMyCode: false
+        })
+        await debugger_.start()
+        debuggerLastError = null
+        return `Reconnected ${adapter.kind} to PID ${health.pid}`
+      } catch (e) {
+        debuggerLastError = (e as Error).message
+        debugger_ = null
+        return `Reconnect failed: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Get variables for current frame
+  tools.push({
+    name: 'debugger_variables',
+    description: 'Get local variables in the current stack frame (only works when paused)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        frameId: { type: 'number', description: 'Frame ID from stack trace (optional — defaults to current frame)' }
+      }
+    },
+    handler: async (args) => {
+      if (!debugger_) return 'Debugger not connected'
+      try {
+        const stopped = debugger_.getStoppedContext()
+        const frameId = (args.frameId as number | undefined) ?? stopped.frameId
+        if (frameId === null) return 'Not paused — no active frame context'
+        const vars = await debugger_.getVariables(frameId)
+        return JSON.stringify(vars, null, 2)
+      } catch (e) {
+        return `Error getting variables: ${(e as Error).message}`
+      }
     }
   })
 

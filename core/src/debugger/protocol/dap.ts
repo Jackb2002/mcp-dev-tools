@@ -28,6 +28,7 @@ interface DAPResponse {
   request_seq: number
   command: string
   success: boolean
+  message?: string   // top-level error description per DAP spec
   body?: Record<string, unknown>
 }
 
@@ -59,6 +60,8 @@ export class DAPDebugger extends BaseDebugAdapter {
   private pendingRequests = new Map<number, (response: DAPResponse) => void>()
   private threadMap = new Map<number, string>() // threadId -> threadName
   private listeners: Map<string, Set<Function>> = new Map()
+  private currentFrameId: number | null = null   // frame captured on last stopped event
+  private stoppedThreadId: number | null = null  // thread that triggered the last stop
 
   constructor(
     private adapterPath: string,
@@ -107,6 +110,7 @@ export class DAPDebugger extends BaseDebugAdapter {
 
         try {
           const message = JSON.parse(body) as DAPMessage
+          console.error('[DAP ←]', JSON.stringify(message).slice(0, 300))
           if (message.type === 'response') {
             this.handleResponse(message as DAPResponse)
           } else if (message.type === 'event') {
@@ -176,6 +180,21 @@ export class DAPDebugger extends BaseDebugAdapter {
     } catch (e) {
       console.error('[DAP] threads request non-fatal:', (e as Error).message)
     }
+
+    // When execution stops (breakpoint, pause, step), automatically capture
+    // the top frame ID so evaluate() and getVariables() have a valid context.
+    this.addEventListener('stopped', async (body: any) => {
+      const threadId: number = body?.threadId ?? this.getMainThreadId()
+      this.stoppedThreadId = threadId
+      try {
+        const resp = await this.sendRequest('stackTrace', { threadId, startFrame: 0, levels: 1 })
+        const frames = (resp.body as any)?.stackFrames ?? []
+        this.currentFrameId = frames[0]?.id ?? null
+        console.error(`[DAP] Stopped — thread ${threadId}, frame ${this.currentFrameId}, reason: ${body?.reason}`)
+      } catch (e) {
+        console.error('[DAP] Failed to capture frame on stopped event:', (e as Error).message)
+      }
+    })
   }
 
   // Handle reverse requests sent by vsdbg (e.g. the security handshake)
@@ -321,9 +340,11 @@ export class DAPDebugger extends BaseDebugAdapter {
   }
 
   async evaluate(expr: string, frameId?: number): Promise<EvaluationResult> {
+    // Use caller-supplied frameId, then the auto-captured frame, then 0 as last resort
+    const resolvedFrameId = frameId ?? this.currentFrameId ?? 0
     const response = await this.sendRequest('evaluate', {
       expression: expr,
-      frameId: frameId || 0,
+      frameId: resolvedFrameId,
       context: 'watch'
     })
 
@@ -424,12 +445,17 @@ export class DAPDebugger extends BaseDebugAdapter {
         if (response.success) {
           resolve(response)
         } else {
-          const msg = (response.body as any)?.message ?? (response.body as any)?.error?.message ?? JSON.stringify(response.body)
+          const msg = response.message
+            ?? (response.body as any)?.message
+            ?? (response.body as any)?.error?.message
+            ?? JSON.stringify(response.body)
+            ?? 'no details'
           reject(new Error(`DAP request ${command} failed: ${msg}`))
         }
       })
 
       const content = JSON.stringify(message)
+      console.error('[DAP →]', JSON.stringify(message).slice(0, 300))
       const header = `Content-Length: ${Buffer.byteLength(content)}\r\n\r\n`
       stdin.write(header + content)
     })
@@ -474,5 +500,40 @@ export class DAPDebugger extends BaseDebugAdapter {
 
   private getMainThreadId(): number {
     return this.threadMap.size > 0 ? Array.from(this.threadMap.keys())[0] : 1
+  }
+
+  /** List all live threads from the adapter */
+  async listThreads(): Promise<Array<{ id: number; name: string }>> {
+    const resp = await this.sendRequest('threads', {})
+    const threads = (resp.body as any)?.threads || []
+    // Keep threadMap in sync
+    this.threadMap.clear()
+    for (const t of threads) {
+      this.threadMap.set(t.id, t.name ?? t.id.toString())
+    }
+    return threads.map((t: any) => ({ id: t.id, name: t.name ?? `Thread ${t.id}` }))
+  }
+
+  /** List source files the adapter has loaded (useful for diagnosing breakpoint path mismatches) */
+  async getLoadedSources(): Promise<Array<{ name: string; path: string }>> {
+    const resp = await this.sendRequest('loadedSources', {})
+    const sources = (resp.body as any)?.sources || []
+    return sources.map((s: any) => ({ name: s.name ?? '', path: s.path ?? '' }))
+  }
+
+  /** Full stack trace for a thread (defaults to the stopped thread or main thread) */
+  async getFullStackTrace(threadId?: number): Promise<StackFrame[]> {
+    const tid = threadId ?? this.stoppedThreadId ?? this.getMainThreadId()
+    return this.getStackTrace(tid)
+  }
+
+  /** Current stopped state */
+  getStoppedContext(): { threadId: number | null; frameId: number | null } {
+    return { threadId: this.stoppedThreadId, frameId: this.currentFrameId }
+  }
+
+  /** Diagnostic: returns a copy of the current thread map */
+  getThreadMap(): Map<number, string> {
+    return new Map(this.threadMap)
   }
 }
