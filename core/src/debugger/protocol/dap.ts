@@ -73,12 +73,29 @@ export class DAPDebugger extends BaseDebugAdapter {
   async start(): Promise<void> {
     await super.start()
 
-    // Native binaries (e.g. vsdbg-ui) are spawned directly with --interpreter=vscode.
+    // Native binaries (e.g. netcoredbg) are spawned directly with --interpreter=vscode.
     // Node.js adapter scripts are spawned via `node`.
+    // For attach sessions with native binaries, pass --attach-pid=<PID> as a CLI arg
+    // so netcoredbg injects into the CLR at startup rather than via the DAP attach request
+    // (the DAP attach on macOS can succeed at the protocol level but fail to inspect the CLR).
     const isNodeScript = this.adapterPath.endsWith('.js')
-    const [cmd, args] = isNodeScript
-      ? ['node', [this.adapterPath]]
-      : [this.adapterPath, ['--interpreter=vscode']]
+    const isAttach = (this.launchConfig.request as string) === 'attach'
+    const pid = this.launchConfig.processId as number | undefined
+
+    let cmd: string
+    let args: string[]
+    if (isNodeScript) {
+      cmd = 'node'
+      args = [this.adapterPath]
+    } else if (isAttach && pid) {
+      // Use --attach <pid> --interpreter=vscode so netcoredbg injects into the CLR
+      // at startup rather than via the DAP attach request (more reliable on macOS).
+      cmd = this.adapterPath
+      args = ['--attach', String(pid), '--interpreter=vscode']
+    } else {
+      cmd = this.adapterPath
+      args = ['--interpreter=vscode']
+    }
 
     this.debugProcess = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'pipe']
@@ -129,6 +146,12 @@ export class DAPDebugger extends BaseDebugAdapter {
       console.error('Debug adapter error:', chunk.toString())
     })
 
+    // When using --attach-pid, netcoredbg attaches synchronously at startup and may
+    // send a 'stopped' event before we even send initialize. Give it a moment to settle.
+    if (!isNodeScript && isAttach && !!pid) {
+      await new Promise(r => setTimeout(r, 500))
+    }
+
     // Send initialize request — adapterID must be 'coreclr' for vsdbg
     await this.sendRequest('initialize', {
       adapterID: 'coreclr',
@@ -145,9 +168,16 @@ export class DAPDebugger extends BaseDebugAdapter {
       supportsInvalidatedEvent: true
     })
 
-    // Send launch or attach request based on launchConfig.request
+    // For attach sessions using --attach-pid CLI arg, netcoredbg is already attached
+    // at startup — the DAP attach request is skipped (netcoredbg would reject it).
+    // For all other sessions (launch, or Node.js adapters that use DAP attach), send normally.
     const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
-    await this.sendRequest(sessionType, this.launchConfig)
+    const usedCliAttach = !isNodeScript && isAttach && !!pid
+    if (!usedCliAttach) {
+      await this.sendRequest(sessionType, this.launchConfig)
+    } else {
+      console.error('[DAP] Skipping DAP attach request — already attached via --attach-pid')
+    }
 
     // Send configurationDone to signal end of setup. Some adapters return
     // success:false when another debugger is already attached — treat as
