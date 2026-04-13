@@ -1,0 +1,21 @@
+{
+  "projectName": "MyDotNetProject",
+  "workingDir": "/Users/username/projects/my-project",
+  "language": "dotnet",
+  "appPort": 5210,
+  "appPort2": 7090,
+  "buildCommand": "dotnet build",
+  "testCommand": "dotnet test",
+  "logDir": "MyProject/Logs",
+  "debugLogFile": "/tmp/app.log",
+  "gitBaseBranch": "main",
+  "debugger": {
+    "enabled": true,
+    "debugPort": 5555,
+    "debugAdapter": "netcore",
+    "enableHotReload": true,
+    "captureMemoryStats": true,
+    "captureProfilingData": true,
+    "sourceMapPath": "bin/Debug/net8.0"
+  }
+}

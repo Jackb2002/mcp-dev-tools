@@ -1,0 +1,6 @@
+{
+  "name": "@dev-tools/vs-extension",
+  "version": "0.1.0",
+  "description": "Visual Studio extension for development tools",
+  "private": true
+}

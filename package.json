@@ -1,0 +1,20 @@
+{
+  "name": "comms-reporter-dev-tools",
+  "version": "0.1.0",
+  "description": "Generic MCP server + VS extension for real-time development insights",
+  "private": true,
+  "workspaces": [
+    "core",
+    "mcp-server",
+    "vs-extension"
+  ],
+  "scripts": {
+    "build": "npm run build -w core && npm run build -w mcp-server",
+    "dev": "npm run dev -w core",
+    "test": "npm run test -w core",
+    "lint": "npm run lint -w core && npm run lint -w mcp-server"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
