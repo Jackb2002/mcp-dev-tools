@@ -111,6 +111,8 @@ export class DAPDebugger extends BaseDebugAdapter {
             this.handleResponse(message as DAPResponse)
           } else if (message.type === 'event') {
             this.handleEvent(message as DAPEvent)
+          } else if (message.type === 'request') {
+            this.handleIncomingRequest(message as DAPRequest)
           }
         } catch (e) {
           console.error('Failed to parse DAP message:', body, e)
@@ -122,10 +124,6 @@ export class DAPDebugger extends BaseDebugAdapter {
     this.debugProcess.stderr?.on('data', (chunk: Buffer) => {
       console.error('Debug adapter error:', chunk.toString())
     })
-
-    // Register the 'initialized' listener BEFORE sending initialize — the
-    // event can arrive at any point during the handshake and must not be missed.
-    const initializedPromise = this.waitForEvent('initialized', 10000)
 
     // Send initialize request — adapterID must be 'coreclr' for vsdbg
     await this.sendRequest('initialize', {
@@ -147,24 +145,33 @@ export class DAPDebugger extends BaseDebugAdapter {
     const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
     await this.sendRequest(sessionType, this.launchConfig)
 
-    // Wait for 'initialized' (may have already resolved) then finish handshake
-    await initializedPromise
+    // vsdbg does not send an 'initialized' event — send configurationDone
+    // immediately after attach to complete the handshake.
     await this.sendRequest('configurationDone', {})
   }
 
-  // Resolves when the named DAP event arrives, or rejects on timeout.
-  private waitForEvent(eventName: string, timeoutMs: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`Timed out waiting for DAP event '${eventName}'`))
-      }, timeoutMs)
+  // Handle reverse requests sent by vsdbg (e.g. the security handshake)
+  private handleIncomingRequest(req: DAPRequest): void {
+    if (req.command === 'handshake') {
+      // vsdbg sends a Microsoft-specific security challenge during init.
+      // For local stdio sessions the response value is not validated,
+      // so respond with an empty string to unblock the adapter.
+      this.sendHandshakeResponse(req.seq)
+    }
+  }
 
-      const unsub = this.addEventListener(eventName, () => {
-        clearTimeout(timer)
-        unsub()
-        resolve()
-      })
+  private sendHandshakeResponse(requestSeq: number): void {
+    const stdin = this.debugProcess?.stdin
+    if (!stdin) return
+    const body = JSON.stringify({
+      seq: this.messageId++,
+      type: 'response',
+      request_seq: requestSeq,
+      success: true,
+      command: 'handshake',
+      body: { value: '' }
     })
+    stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
   }
 
   async stop(): Promise<void> {
