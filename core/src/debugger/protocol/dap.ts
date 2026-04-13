@@ -142,6 +142,27 @@ export class DAPDebugger extends BaseDebugAdapter {
     // Send launch or attach request based on launchConfig.request
     const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
     await this.sendRequest(sessionType, this.launchConfig)
+
+    // Wait for the 'initialized' event — vsdbg emits this when it is ready
+    // to accept breakpoint configuration. Then send configurationDone to
+    // signal we are finished setting up and execution should resume.
+    await this.waitForEvent('initialized', 10000)
+    await this.sendRequest('configurationDone', {})
+  }
+
+  // Resolves when the named DAP event arrives, or rejects on timeout.
+  private waitForEvent(eventName: string, timeoutMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Timed out waiting for DAP event '${eventName}'`))
+      }, timeoutMs)
+
+      const unsub = this.addEventListener(eventName, () => {
+        clearTimeout(timer)
+        unsub()
+        resolve()
+      })
+    })
   }
 
   async stop(): Promise<void> {
