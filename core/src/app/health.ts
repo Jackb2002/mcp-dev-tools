@@ -59,15 +59,13 @@ export async function getHealth(appPort?: number): Promise<Health> {
   let error: string | undefined
 
   try {
-    // macOS/Linux: lsof -i :PORT
-    const output = execSafe(`lsof -i :${port}`, undefined)
+    // macOS/Linux: restrict to LISTEN state so we get the server process,
+    // not a browser or other client that happens to be connected to the port.
+    const output = execSafe(`lsof -i TCP:${port} -sTCP:LISTEN -t`, undefined)
     if (output.exitCode === 0) {
-      const lines = output.stdout.split('\n')
-      if (lines.length > 1) {
-        const parts = lines[1].split(/\s+/)
-        if (parts.length > 1) {
-          pid = parseInt(parts[1], 10)
-        }
+      const raw = output.stdout.trim()
+      if (raw) {
+        pid = parseInt(raw.split('\n')[0], 10)
       }
     }
   } catch (err) {

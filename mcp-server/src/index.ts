@@ -505,6 +505,25 @@ function initializeTools(): void {
     }
   })
 
+  // Debugger status tool — always available, shows connection state
+  tools.push({
+    name: 'debugger_status',
+    description: 'Show debugger connection status, vsdbg path, and attached PID',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      const config = CoreLib.getConfigManager().getConfig()
+      const vsdbgPath = CoreLib.findVsdbgPath()
+      const health = await CoreLib.getHealth(config.appPort)
+      return JSON.stringify({
+        connected: debugger_ !== null && debugger_.isRunning(),
+        vsdbgPath: vsdbgPath ?? 'not found',
+        appRunning: health.running,
+        appPid: health.pid ?? null,
+        debuggerEnabled: config.debugger?.enabled ?? false
+      }, null, 2)
+    }
+  })
+
   console.error(`[MCP Server] Initialized ${tools.length} tools`)
 }
 
