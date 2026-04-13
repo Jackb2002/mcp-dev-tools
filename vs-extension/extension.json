@@ -1,0 +1,40 @@
+{
+  "manifestVersion": 3,
+  "id": "dev-tools-extension",
+  "version": "0.1.0",
+  "name": "Development Tools",
+  "description": "Real-time development insights: builds, git, disk usage, app health, database info, and interactive debugging",
+  "publisher": "dev-tools",
+  "icon": "extension-icon.png",
+  "license": "MIT",
+  "minimumVsixVersion": "3.0.0",
+  "minimumVisualStudioVersion": "[17.0, 18.0)",
+  "InstallationTarget": {
+    "Id": "Microsoft.VisualStudio.Community",
+    "Version": "[17.0, 18.0)"
+  },
+  "Categories": [
+    "Other"
+  ],
+  "Tags": [
+    "development",
+    "tools",
+    "debugging",
+    "git",
+    "build"
+  ],
+  "GalleryFlags": "Public",
+  "Screenshots": [],
+  "PreviewImage": null,
+  "ReleaseNotes": "Initial preview release with core development tools panels.",
+  "Metadata": {
+    "SystemComponent": "false",
+    "PreRelease": "true"
+  },
+  "Assets": [
+    {
+      "Type": "Microsoft.VisualStudio.Code.Manifest",
+      "Path": "extension.json"
+    }
+  ]
+}

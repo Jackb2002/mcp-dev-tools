@@ -6,13 +6,14 @@
   "workspaces": [
     "core",
     "mcp-server",
-    "vs-extension"
+    "vs-extension",
+    "vscode-extension"
   ],
   "scripts": {
-    "build": "npm run build -w core && npm run build -w mcp-server",
+    "build": "npm run build -w core && npm run build -w mcp-server && npm run build -w vscode-extension && npm run build -w vs-extension",
     "dev": "npm run dev -w core",
     "test": "npm run test -w core",
-    "lint": "npm run lint -w core && npm run lint -w mcp-server"
+    "lint": "npm run lint -w core && npm run lint -w mcp-server && npm run lint -w vscode-extension"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

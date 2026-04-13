@@ -25,10 +25,19 @@ interface ManagedResource {
   name: string
   description: string
   mimeType: string
+  ttlMs?: number
   fetch: () => Promise<string>
 }
 
+interface CacheEntry {
+  value: string
+  fetchedAt: number
+  lastKnownGood?: string
+  errorCount: number
+}
+
 const resources: ManagedResource[] = []
+const resourceCache = new Map<string, CacheEntry>()
 
 /**
  * Tool definitions
@@ -60,6 +69,7 @@ function initializeResources(): void {
     name: 'Build Log (Latest)',
     description: 'Last 100 lines of build log output',
     mimeType: 'text/plain',
+    ttlMs: 10000,
     fetch: async () => CoreLib.getBuildLog(100)
   })
 
@@ -68,6 +78,7 @@ function initializeResources(): void {
     name: 'Test Results',
     description: 'Last test run results',
     mimeType: 'application/json',
+    ttlMs: 120000,
     fetch: async () => {
       const results = await CoreLib.getTestResults()
       return JSON.stringify(results, null, 2)
@@ -80,6 +91,7 @@ function initializeResources(): void {
     name: 'Git Status',
     description: 'Current git branch, ahead/behind, untracked files',
     mimeType: 'application/json',
+    ttlMs: 30000,
     fetch: async () => {
       const status = await CoreLib.getStatus()
       return JSON.stringify(status, null, 2)
@@ -91,6 +103,7 @@ function initializeResources(): void {
     name: 'Git Diff',
     description: 'Files changed since main branch',
     mimeType: 'application/json',
+    ttlMs: 30000,
     fetch: async () => {
       const diff = await CoreLib.getDiff(config.gitBaseBranch || 'main')
       return JSON.stringify(diff, null, 2)
@@ -102,6 +115,7 @@ function initializeResources(): void {
     name: 'Recent Commits',
     description: 'Last 10 commits',
     mimeType: 'application/json',
+    ttlMs: 30000,
     fetch: async () => {
       const commits = await CoreLib.getRecentCommits(10)
       return JSON.stringify(commits, null, 2)
@@ -114,6 +128,7 @@ function initializeResources(): void {
     name: 'Disk Usage',
     description: 'Directory sizes in project',
     mimeType: 'application/json',
+    ttlMs: 300000,
     fetch: async () => {
       const usage = await CoreLib.getUsage(config.workingDir)
       return JSON.stringify(usage, null, 2)
@@ -125,6 +140,7 @@ function initializeResources(): void {
     name: 'Large Files',
     description: 'Files larger than 100MB',
     mimeType: 'application/json',
+    ttlMs: 300000,
     fetch: async () => {
       const files = await CoreLib.getLargeFiles(config.workingDir, 100)
       return JSON.stringify(files, null, 2)
@@ -136,6 +152,7 @@ function initializeResources(): void {
     name: 'Cleanup Suggestions',
     description: 'Directories that can be cleaned (bin, obj, node_modules, etc)',
     mimeType: 'application/json',
+    ttlMs: 300000,
     fetch: async () => {
       const suggestions = await CoreLib.getCleanupSuggestions(config.workingDir)
       return JSON.stringify(suggestions, null, 2)
@@ -148,6 +165,7 @@ function initializeResources(): void {
     name: 'Recent Builds',
     description: 'Last 20 builds with duration and success status',
     mimeType: 'application/json',
+    ttlMs: 30000,
     fetch: async () => {
       const builds = await CoreLib.getRecentBuilds(20)
       return JSON.stringify(builds, null, 2)
@@ -160,6 +178,7 @@ function initializeResources(): void {
     name: 'App Health',
     description: 'Application running status, PID, memory, ports',
     mimeType: 'application/json',
+    ttlMs: 10000,
     fetch: async () => {
       const health = await CoreLib.getHealth(config.appPort)
       return JSON.stringify(health, null, 2)
@@ -172,6 +191,7 @@ function initializeResources(): void {
     name: 'Database Migrations',
     description: 'EF Core migration status (applied and pending)',
     mimeType: 'application/json',
+    ttlMs: 60000,
     fetch: async () => {
       const migrations = await CoreLib.getMigrationStatus()
       return JSON.stringify(migrations, null, 2)
@@ -183,6 +203,7 @@ function initializeResources(): void {
     name: 'Database Schema',
     description: 'Cached database schema snapshot',
     mimeType: 'application/json',
+    ttlMs: 300000,
     fetch: async () => {
       const schema = await CoreLib.getSchemaSnapshot()
       return JSON.stringify(schema, null, 2)
@@ -488,6 +509,109 @@ function initializeTools(): void {
 }
 
 /**
+ * Fetch resource with retry logic and stale-cache fallback
+ */
+async function fetchWithRetry(
+  resource: ManagedResource,
+  uri: string,
+  maxRetries: number = 2,
+  delayMs: number = 200
+): Promise<string> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const content = await resource.fetch()
+      // Cache on success
+      if (resource.ttlMs) {
+        resourceCache.set(uri, {
+          value: content,
+          fetchedAt: Date.now(),
+          lastKnownGood: content,
+          errorCount: 0
+        })
+      }
+      return content
+    } catch (error) {
+      const entry = resourceCache.get(uri)
+      if (entry) entry.errorCount++
+
+      // On last retry failure, try stale cache
+      if (attempt === maxRetries) {
+        if (entry?.lastKnownGood) {
+          return `[STALE CACHE - FETCH FAILED]\n${entry.lastKnownGood}\n\nError: ${(error as Error).message}`
+        }
+        return `Error fetching resource: ${(error as Error).message}`
+      }
+
+      // Wait before retry
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, delayMs))
+      }
+    }
+  }
+  return 'Unknown error'
+}
+
+/**
+ * Initialize file watchers for cache invalidation
+ */
+function initializeWatchers(): void {
+  const config = CoreLib.getConfigManager().getConfig()
+  const unsubscribers: CoreLib.Unsubscribe[] = []
+
+  // Watch debug log → invalidate build-latest cache
+  try {
+    const unsubDebug = CoreLib.watchDebugLog(() => {
+      resourceCache.delete('commsreporter://logs/build-latest')
+    })
+    unsubscribers.push(unsubDebug)
+  } catch (e) {
+    console.error('[MCP Server] watchDebugLog failed:', e)
+  }
+
+  // Watch git changes → invalidate git resources
+  try {
+    const fs = require('fs')
+    const gitHeadPath = `${config.workingDir}/.git/HEAD`
+    const gitIndexPath = `${config.workingDir}/.git/index`
+
+    if (fs.existsSync(gitHeadPath)) {
+      const headWatcher = fs.watch(gitHeadPath, () => {
+        resourceCache.delete('commsreporter://git/status')
+        resourceCache.delete('commsreporter://git/diff')
+        resourceCache.delete('commsreporter://git/recent-commits')
+      })
+      unsubscribers.push(() => headWatcher.close())
+    }
+
+    if (fs.existsSync(gitIndexPath)) {
+      const indexWatcher = fs.watch(gitIndexPath, () => {
+        resourceCache.delete('commsreporter://git/status')
+        resourceCache.delete('commsreporter://git/diff')
+        resourceCache.delete('commsreporter://git/recent-commits')
+      })
+      unsubscribers.push(() => indexWatcher.close())
+    }
+  } catch (e) {
+    console.error('[MCP Server] Git watchers failed:', e)
+  }
+
+  // Wire health polling → proactive cache refresh
+  try {
+    const unsubHealth = CoreLib.watchHealth(() => {
+      // Health callback updates internal state; invalidate cache
+      resourceCache.delete('commsreporter://app/health')
+    })
+    unsubscribers.push(unsubHealth)
+  } catch (e) {
+    console.error('[MCP Server] watchHealth failed:', e)
+  }
+
+  // Store for cleanup on shutdown (future enhancement)
+  ;(process as any).devToolsWatchers = unsubscribers
+  console.error(`[MCP Server] Initialized ${unsubscribers.length} file watchers`)
+}
+
+/**
  * Main server
  */
 async function main(): Promise<void> {
@@ -501,6 +625,7 @@ async function main(): Promise<void> {
     // Initialize resources and tools
     initializeResources()
     initializeTools()
+    initializeWatchers()
 
     // Create MCP server
     const server = new Server(
@@ -538,7 +663,26 @@ async function main(): Promise<void> {
       }
 
       try {
-        const content = await resource.fetch()
+        let content = ''
+        const now = Date.now()
+        const uri = request.params.uri
+
+        // Check cache if TTL is set
+        if (resource.ttlMs && resourceCache.has(uri)) {
+          const entry = resourceCache.get(uri)!
+          const age = now - entry.fetchedAt
+          if (age < resource.ttlMs) {
+            // Cache hit
+            content = entry.value
+          } else {
+            // Cache expired; fetch fresh
+            content = await fetchWithRetry(resource, uri)
+          }
+        } else {
+          // Not cacheable or not in cache yet
+          content = await fetchWithRetry(resource, uri)
+        }
+
         return {
           contents: [
             {
