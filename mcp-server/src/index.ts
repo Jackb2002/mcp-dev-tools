@@ -518,11 +518,12 @@ function initializeTools(): void {
     inputSchema: { type: 'object', properties: {} },
     handler: async () => {
       const config = CoreLib.getConfigManager().getConfig()
-      const vsdbgPath = CoreLib.findVsdbgPath()
+      const adapter = CoreLib.findDebugAdapter()
       const health = await CoreLib.getHealth(config.appPort)
       return JSON.stringify({
         connected: debugger_ !== null && debugger_.isRunning(),
-        vsdbgPath: vsdbgPath ?? 'not found',
+        adapterKind: adapter?.kind ?? 'not found',
+        adapterPath: adapter?.path ?? 'not found',
         appRunning: health.running,
         appPid: health.pid ?? null,
         debuggerEnabled: config.debugger?.enabled ?? false,
@@ -655,16 +656,17 @@ async function main(): Promise<void> {
 
     // Attach debugger to running process if enabled
     if (config.debugger?.enabled) {
-      const vsdbgPath = CoreLib.findVsdbgPath()
-      if (!vsdbgPath) {
-        console.error('[MCP Server] vsdbg not found — debugger tools will be unavailable')
+      const adapter = CoreLib.findDebugAdapter()
+      if (!adapter) {
+        console.error('[MCP Server] No .NET debug adapter found (install netcoredbg or VS Code C# extension)')
       } else {
         const health = await CoreLib.getHealth(config.appPort)
         if (!health.pid) {
           console.error('[MCP Server] App not running or PID unavailable — debugger tools will be unavailable')
         } else {
           try {
-            console.error(`[MCP Server] Attaching debugger to PID ${health.pid} via ${vsdbgPath}`)
+            console.error(`[MCP Server] Attaching ${adapter.kind} to PID ${health.pid} via ${adapter.path}`)
+            const vsdbgPath = adapter.path
             debugger_ = new CoreLib.DAPDebugger(vsdbgPath, {
               request: 'attach',
               processId: health.pid,
