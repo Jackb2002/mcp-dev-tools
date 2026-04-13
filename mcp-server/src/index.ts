@@ -627,6 +627,33 @@ async function main(): Promise<void> {
     initializeTools()
     initializeWatchers()
 
+    // Attach debugger to running process if enabled
+    if (config.debugger?.enabled) {
+      const vsdbgPath = CoreLib.findVsdbgPath()
+      if (!vsdbgPath) {
+        console.error('[MCP Server] vsdbg not found — debugger tools will be unavailable')
+      } else {
+        const health = await CoreLib.getHealth(config.appPort)
+        if (!health.pid) {
+          console.error('[MCP Server] App not running or PID unavailable — debugger tools will be unavailable')
+        } else {
+          try {
+            console.error(`[MCP Server] Attaching debugger to PID ${health.pid} via ${vsdbgPath}`)
+            debugger_ = new CoreLib.DAPDebugger(vsdbgPath, {
+              request: 'attach',
+              processId: health.pid,
+              justMyCode: false
+            })
+            await debugger_.start()
+            console.error(`[MCP Server] Debugger attached to PID ${health.pid}`)
+          } catch (e) {
+            console.error('[MCP Server] Debugger attach failed (continuing without):', e)
+            debugger_ = null
+          }
+        }
+      }
+    }
+
     // Create MCP server
     const server = new Server(
       {

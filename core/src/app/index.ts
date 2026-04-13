@@ -3,3 +3,4 @@
  */
 
 export { getHealth, watchHealth } from './health'
+export { findVsdbgPath } from './vsdbg'

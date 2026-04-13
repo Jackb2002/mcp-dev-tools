@@ -53,7 +53,7 @@ export { getUsage, getLargeFiles, getCleanupSuggestions } from './disk'
 export { trackBuild, getRecentBuilds } from './build'
 
 // App
-export { getHealth, watchHealth } from './app'
+export { getHealth, watchHealth, findVsdbgPath } from './app'
 
 // Database
 export { getMigrationStatus, getSchemaSnapshot, updateSchemaSnapshot } from './db'

@@ -43,7 +43,15 @@ type DAPMessage = DAPRequest | DAPResponse | DAPEvent
 /**
  * DAP client implementation for multi-language debugging
  * Launches a debug adapter (vscode-debug-adapter, netcore debugger, etc)
- * and communicates via the DAP protocol over stdin/stdout
+ * and communicates via the DAP protocol over stdin/stdout.
+ *
+ * Supports two adapter styles:
+ *  - Node.js scripts (*.js)  → spawned as `node <adapterPath>`
+ *  - Native binaries (vsdbg) → spawned directly as `<adapterPath> --interpreter=vscode`
+ *
+ * Supports two session styles controlled by launchConfig.request:
+ *  - "launch"  → starts a new process
+ *  - "attach"  → attaches to an existing process by PID
  */
 export class DAPDebugger extends BaseDebugAdapter {
   private debugProcess: ChildProcess | null = null
@@ -62,8 +70,14 @@ export class DAPDebugger extends BaseDebugAdapter {
   async start(): Promise<void> {
     await super.start()
 
-    // Spawn debug adapter process
-    this.debugProcess = spawn('node', [this.adapterPath], {
+    // Native binaries (e.g. vsdbg-ui) are spawned directly with --interpreter=vscode.
+    // Node.js adapter scripts are spawned via `node`.
+    const isNodeScript = this.adapterPath.endsWith('.js')
+    const [cmd, args] = isNodeScript
+      ? ['node', [this.adapterPath]]
+      : [this.adapterPath, ['--interpreter=vscode']]
+
+    this.debugProcess = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'pipe']
     })
 
@@ -121,8 +135,9 @@ export class DAPDebugger extends BaseDebugAdapter {
       supportsRunInTerminalRequest: false
     })
 
-    // Send launch configuration
-    await this.sendRequest('launch', this.launchConfig)
+    // Send launch or attach request based on launchConfig.request
+    const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
+    await this.sendRequest(sessionType, this.launchConfig)
   }
 
   async stop(): Promise<void> {
