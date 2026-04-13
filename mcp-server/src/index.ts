@@ -9,7 +9,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
-  ResourceContents
+  ResourceContents,
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  Tool
 } from '@modelcontextprotocol/sdk/types.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import * as CoreLib from '@dev-tools/core'
@@ -26,6 +29,24 @@ interface ManagedResource {
 }
 
 const resources: ManagedResource[] = []
+
+/**
+ * Tool definitions
+ */
+interface ManagedTool {
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
+  handler: (args: Record<string, unknown>) => Promise<string>
+}
+
+const tools: ManagedTool[] = []
+
+// Global debugger instance
+let debugger_: CoreLib.DAPDebugger | null = null
+const breakpointManager = new CoreLib.BreakpointManager()
+const stackManager = new CoreLib.StackManager()
+const watchManager = new CoreLib.WatchManager()
 
 /**
  * Initialize all resources
@@ -168,7 +189,302 @@ function initializeResources(): void {
     }
   })
 
+  // Debugger resources
+  resources.push({
+    uri: 'commsreporter://debugger/breakpoints',
+    name: 'Breakpoints',
+    description: 'Active breakpoints',
+    mimeType: 'application/json',
+    fetch: async () => {
+      return JSON.stringify(breakpointManager.getAll(), null, 2)
+    }
+  })
+
+  resources.push({
+    uri: 'commsreporter://debugger/stack',
+    name: 'Stack Trace',
+    description: 'Current stack trace and execution context',
+    mimeType: 'application/json',
+    fetch: async () => {
+      const context = stackManager.getCurrentContext()
+      const threads = stackManager.getThreads()
+      return JSON.stringify({ context, threads }, null, 2)
+    }
+  })
+
+  resources.push({
+    uri: 'commsreporter://debugger/variables',
+    name: 'Variables',
+    description: 'Local variables in current stack frame',
+    mimeType: 'application/json',
+    fetch: async () => {
+      const context = stackManager.getCurrentContext()
+      if (!context) {
+        return JSON.stringify({ error: 'No active frame context' })
+      }
+      // Would fetch from debugger in real implementation
+      return JSON.stringify([])
+    }
+  })
+
+  resources.push({
+    uri: 'commsreporter://debugger/watches',
+    name: 'Watches',
+    description: 'Watch expressions and their values',
+    mimeType: 'application/json',
+    fetch: async () => {
+      return JSON.stringify(watchManager.getAll(), null, 2)
+    }
+  })
+
+  resources.push({
+    uri: 'commsreporter://debugger/threads',
+    name: 'Threads',
+    description: 'Active threads and their state',
+    mimeType: 'application/json',
+    fetch: async () => {
+      return JSON.stringify(stackManager.getThreads(), null, 2)
+    }
+  })
+
   console.error(`[MCP Server] Initialized ${resources.length} resources`)
+}
+
+/**
+ * Initialize all debugger tools
+ */
+function initializeTools(): void {
+  // Set breakpoint tool
+  tools.push({
+    name: 'debugger_set_breakpoint',
+    description: 'Set a breakpoint at a specific file and line',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'File path' },
+        line: { type: 'number', description: 'Line number' }
+      },
+      required: ['file', 'line']
+    },
+    handler: async (args) => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        const bp = await debugger_.setBreakpoint(String(args.file), Number(args.line))
+        breakpointManager.add(bp)
+        return `Breakpoint set at ${args.file}:${args.line}`
+      } catch (e) {
+        return `Error setting breakpoint: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Clear breakpoint tool
+  tools.push({
+    name: 'debugger_clear_breakpoint',
+    description: 'Clear a breakpoint by ID',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Breakpoint ID' }
+      },
+      required: ['id']
+    },
+    handler: async (args) => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        await debugger_.clearBreakpoint(String(args.id))
+        breakpointManager.remove(String(args.id))
+        return `Breakpoint cleared: ${args.id}`
+      } catch (e) {
+        return `Error clearing breakpoint: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Continue execution tool
+  tools.push({
+    name: 'debugger_continue',
+    description: 'Continue execution until next breakpoint',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    },
+    handler: async () => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        await debugger_.continue()
+        return 'Execution continued'
+      } catch (e) {
+        return `Error continuing: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Pause execution tool
+  tools.push({
+    name: 'debugger_pause',
+    description: 'Pause execution',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    },
+    handler: async () => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        await debugger_.pause()
+        return 'Execution paused'
+      } catch (e) {
+        return `Error pausing: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Step over tool
+  tools.push({
+    name: 'debugger_step_over',
+    description: 'Step over current line',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    },
+    handler: async () => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        await debugger_.stepOver()
+        return 'Stepped over'
+      } catch (e) {
+        return `Error stepping: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Step into tool
+  tools.push({
+    name: 'debugger_step_into',
+    description: 'Step into current line',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    },
+    handler: async () => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        await debugger_.stepInto()
+        return 'Stepped into'
+      } catch (e) {
+        return `Error stepping: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Step out tool
+  tools.push({
+    name: 'debugger_step_out',
+    description: 'Step out of current function',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    },
+    handler: async () => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        await debugger_.stepOut()
+        return 'Stepped out'
+      } catch (e) {
+        return `Error stepping: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Evaluate expression tool
+  tools.push({
+    name: 'debugger_evaluate',
+    description: 'Evaluate an expression in the current context',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        expression: { type: 'string', description: 'Expression to evaluate' }
+      },
+      required: ['expression']
+    },
+    handler: async (args) => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        const result = await debugger_.evaluate(String(args.expression))
+        return `${result.value} (${result.type})`
+      } catch (e) {
+        return `Error evaluating: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Add watch tool
+  tools.push({
+    name: 'debugger_add_watch',
+    description: 'Add a watch expression',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        expression: { type: 'string', description: 'Expression to watch' }
+      },
+      required: ['expression']
+    },
+    handler: async (args) => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        const watch = await debugger_.addWatch(String(args.expression))
+        watchManager.add(args.expression as string)
+        return `Watch added: ${watch.id}`
+      } catch (e) {
+        return `Error adding watch: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Remove watch tool
+  tools.push({
+    name: 'debugger_remove_watch',
+    description: 'Remove a watch expression',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Watch ID' }
+      },
+      required: ['id']
+    },
+    handler: async (args) => {
+      if (!debugger_) {
+        return 'Debugger not running'
+      }
+      try {
+        await debugger_.removeWatch(String(args.id))
+        watchManager.remove(String(args.id))
+        return `Watch removed: ${args.id}`
+      } catch (e) {
+        return `Error removing watch: ${(e as Error).message}`
+      }
+    }
+  })
+
+  console.error(`[MCP Server] Initialized ${tools.length} tools`)
 }
 
 /**
@@ -182,17 +498,20 @@ async function main(): Promise<void> {
     console.error(`[MCP Server] Project: ${config.projectName}`)
     console.error(`[MCP Server] Language: ${config.language}`)
 
-    // Initialize resources
+    // Initialize resources and tools
     initializeResources()
+    initializeTools()
 
     // Create MCP server
     const server = new Server(
       {
         name: 'dev-tools-mcp',
-        version: '0.2.0'
+        version: '0.3.0'
       },
       {
-        capabilities: {}
+        capabilities: {
+          tools: {}
+        }
       }
     )
 
@@ -243,12 +562,57 @@ async function main(): Promise<void> {
       }
     })
 
+    /**
+     * Handle list tools request
+     */
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema as Tool['inputSchema']
+      }))
+    }))
+
+    /**
+     * Handle call tool request
+     */
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const tool = tools.find(t => t.name === request.params.name)
+
+      if (!tool) {
+        throw new Error(`Tool not found: ${request.params.name}`)
+      }
+
+      try {
+        const result = await tool.handler(request.params.arguments || {})
+        return {
+          content: [
+            {
+              type: 'text',
+              text: result
+            }
+          ]
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error calling tool: ${errorMsg}`
+            }
+          ],
+          isError: true
+        }
+      }
+    })
+
     // Connect via stdio (for Claude integration)
     const transport = new StdioServerTransport()
     await server.connect(transport)
 
     console.error(`[MCP Server] Connected and ready`)
-    console.error(`[MCP Server] Serving ${resources.length} resources`)
+    console.error(`[MCP Server] Serving ${resources.length} resources and ${tools.length} tools`)
   } catch (error) {
     console.error(`[MCP Server] Fatal error:`, error)
     process.exit(1)
