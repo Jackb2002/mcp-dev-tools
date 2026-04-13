@@ -32,7 +32,10 @@ export async function getUsage(dir?: string): Promise<Record<string, string>> {
     return result
   } catch (error) {
     // Fallback: manual directory size calculation
-    return calculateDirSize(targetDir)
+    const dirSizes = calculateDirSize(targetDir)
+    // Include error info so callers know du failed
+    dirSizes['_error'] = `du command failed, using fallback: ${(error as Error).message}`
+    return dirSizes
   }
 }
 

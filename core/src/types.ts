@@ -90,6 +90,7 @@ export interface Health {
   uptime?: string
   memory?: string
   ports?: number[]
+  _error?: string
 }
 
 // Database
