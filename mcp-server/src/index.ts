@@ -15,6 +15,7 @@ import {
   Tool
 } from '@modelcontextprotocol/sdk/types.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import * as path from 'path'
 import * as CoreLib from '@dev-tools/core'
 
 /**
@@ -293,9 +294,13 @@ function initializeTools(): void {
         return 'Debugger not running'
       }
       try {
-        const bp = await debugger_.setBreakpoint(String(args.file), Number(args.line))
+        const config = CoreLib.getConfigManager().getConfig()
+        const file = path.isAbsolute(String(args.file))
+          ? String(args.file)
+          : path.join(config.workingDir, String(args.file))
+        const bp = await debugger_.setBreakpoint(file, Number(args.line))
         breakpointManager.add(bp)
-        return `Breakpoint set at ${args.file}:${args.line}`
+        return `Breakpoint set at ${file}:${args.line} (verified: ${bp.verified})`
       } catch (e) {
         return `Error setting breakpoint: ${(e as Error).message}`
       }

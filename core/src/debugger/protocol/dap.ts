@@ -366,7 +366,8 @@ export class DAPDebugger extends BaseDebugAdapter {
         if (response.success) {
           resolve(response)
         } else {
-          reject(new Error(`DAP request ${command} failed: ${response.body}`))
+          reject(new Error(`DAP request ${command} failed: ${JSON.stringify(response.body)}`))
+
         }
       })
 
