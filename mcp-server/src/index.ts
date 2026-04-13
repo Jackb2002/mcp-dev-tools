@@ -635,6 +635,7 @@ async function main(): Promise<void> {
       },
       {
         capabilities: {
+          resources: {},
           tools: {}
         }
       }
