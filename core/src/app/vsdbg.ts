@@ -7,11 +7,12 @@ import * as os from 'os'
 import * as path from 'path'
 import * as child_process from 'child_process'
 
-// Returns the path to the vsdbg-ui binary, or null if not found.
+// Returns the path to the vsdbg binary, or null if not found.
+// Uses vsdbg (the core DAP server), not vsdbg-ui (the UI wrapper).
 // Search order:
-//  1. ~/.vscode/extensions/ms-dotnettools.csharp-X.Y.Z/.debugger/<arch>/vsdbg-ui
-//  2. /usr/local/share/dotnet/vsdbg/vsdbg-ui  (manual installs)
-//  3. PATH lookup via `which vsdbg-ui`
+//  1. ~/.vscode/extensions/ms-dotnettools.csharp-X.Y.Z/.debugger/<arch>/vsdbg
+//  2. /usr/local/share/dotnet/vsdbg/vsdbg  (manual installs)
+//  3. PATH lookup via `which vsdbg`
 export function findVsdbgPath(): string | null {
   // Resolve arch subfolder used by the C# extension
   const arch = resolveVsdbgArch()
@@ -22,18 +23,18 @@ export function findVsdbgPath(): string | null {
     const entries = fs.readdirSync(extensionsDir)
     for (const entry of entries) {
       if (!entry.startsWith('ms-dotnettools.csharp-')) continue
-      const candidate = path.join(extensionsDir, entry, '.debugger', arch, 'vsdbg-ui')
+      const candidate = path.join(extensionsDir, entry, '.debugger', arch, 'vsdbg')
       if (fs.existsSync(candidate)) return candidate
     }
   }
 
   // 2. Manual / dotnet-script install
-  const manualPath = path.join('/usr/local/share/dotnet/vsdbg', 'vsdbg-ui')
+  const manualPath = path.join('/usr/local/share/dotnet/vsdbg', 'vsdbg')
   if (fs.existsSync(manualPath)) return manualPath
 
   // 3. PATH fallback
   try {
-    const result = child_process.execSync('which vsdbg-ui', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    const result = child_process.execSync('which vsdbg', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
     if (result && fs.existsSync(result)) return result
   } catch {
     // not on PATH — that's fine
