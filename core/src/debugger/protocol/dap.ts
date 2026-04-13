@@ -75,27 +75,10 @@ export class DAPDebugger extends BaseDebugAdapter {
 
     // Native binaries (e.g. netcoredbg) are spawned directly with --interpreter=vscode.
     // Node.js adapter scripts are spawned via `node`.
-    // For attach sessions with native binaries, pass --attach-pid=<PID> as a CLI arg
-    // so netcoredbg injects into the CLR at startup rather than via the DAP attach request
-    // (the DAP attach on macOS can succeed at the protocol level but fail to inspect the CLR).
     const isNodeScript = this.adapterPath.endsWith('.js')
-    const isAttach = (this.launchConfig.request as string) === 'attach'
-    const pid = this.launchConfig.processId as number | undefined
-
-    let cmd: string
-    let args: string[]
-    if (isNodeScript) {
-      cmd = 'node'
-      args = [this.adapterPath]
-    } else if (isAttach && pid) {
-      // Use --attach <pid> --interpreter=vscode so netcoredbg injects into the CLR
-      // at startup rather than via the DAP attach request (more reliable on macOS).
-      cmd = this.adapterPath
-      args = ['--attach', String(pid), '--interpreter=vscode']
-    } else {
-      cmd = this.adapterPath
-      args = ['--interpreter=vscode']
-    }
+    const [cmd, args] = isNodeScript
+      ? ['node', [this.adapterPath]]
+      : [this.adapterPath, ['--interpreter=vscode']]
 
     this.debugProcess = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'pipe']
@@ -143,16 +126,40 @@ export class DAPDebugger extends BaseDebugAdapter {
 
     // Handle adapter errors
     this.debugProcess.stderr?.on('data', (chunk: Buffer) => {
-      console.error('Debug adapter error:', chunk.toString())
+      console.error('Debug adapter stderr:', chunk.toString())
     })
 
-    // When using --attach-pid, netcoredbg attaches synchronously at startup and may
-    // send a 'stopped' event before we even send initialize. Give it a moment to settle.
-    if (!isNodeScript && isAttach && !!pid) {
-      await new Promise(r => setTimeout(r, 500))
-    }
+    // Subscribe to thread events BEFORE sending any requests so we don't miss events.
+    this.addEventListener('thread', (body: any) => {
+      if (body?.reason === 'started') {
+        this.threadMap.set(body.threadId, body.name ?? body.threadId.toString())
+      } else if (body?.reason === 'exited') {
+        this.threadMap.delete(body.threadId)
+      }
+    })
 
-    // Send initialize request — adapterID must be 'coreclr' for vsdbg
+    // When execution stops (breakpoint, pause, step), capture the top frame ID
+    // so evaluate() and getVariables() have a valid context without needing a frameId arg.
+    this.addEventListener('stopped', async (body: any) => {
+      const threadId: number = body?.threadId ?? this.getMainThreadId()
+      this.stoppedThreadId = threadId
+      // Also update thread map — stopped body includes threadId
+      if (!this.threadMap.has(threadId)) {
+        this.threadMap.set(threadId, `Thread ${threadId}`)
+      }
+      try {
+        const resp = await this.sendRequest('stackTrace', { threadId, startFrame: 0, levels: 1 })
+        const frames = (resp.body as any)?.stackFrames ?? []
+        this.currentFrameId = frames[0]?.id ?? null
+        console.error(`[DAP] Stopped — thread ${threadId}, frame ${this.currentFrameId}, reason: ${body?.reason}`)
+      } catch (e) {
+        console.error('[DAP] Failed to capture frame on stopped event:', (e as Error).message)
+      }
+    })
+
+    // Step 1: initialize — wait for response AND the 'initialized' event.
+    // The initialized event signals the adapter is ready for setBreakpoints / attach.
+    const initializedPromise = this.waitForEvent('initialized', 5000)
     await this.sendRequest('initialize', {
       adapterID: 'coreclr',
       clientID: 'dev-tools',
@@ -167,64 +174,41 @@ export class DAPDebugger extends BaseDebugAdapter {
       supportsProgressReporting: true,
       supportsInvalidatedEvent: true
     })
+    // Wait for initialized event (non-fatal if adapter doesn't send it)
+    await initializedPromise.catch((e: Error) =>
+      console.error('[DAP] No initialized event (non-fatal):', e.message)
+    )
 
-    // For attach sessions using --attach-pid CLI arg, netcoredbg is already attached
-    // at startup — the DAP attach request is skipped (netcoredbg would reject it).
-    // For all other sessions (launch, or Node.js adapters that use DAP attach), send normally.
+    // Step 2: attach or launch
     const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
-    const usedCliAttach = !isNodeScript && isAttach && !!pid
-    if (!usedCliAttach) {
-      await this.sendRequest(sessionType, this.launchConfig)
-    } else {
-      console.error('[DAP] Skipping DAP attach request — already attached via --attach-pid')
-    }
+    await this.sendRequest(sessionType, this.launchConfig)
 
-    // Send configurationDone to signal end of setup. Some adapters return
-    // success:false when another debugger is already attached — treat as
-    // a non-fatal warning so the session stays usable for read operations.
+    // Step 3: configurationDone — non-fatal if another debugger is already attached
     try {
       await this.sendRequest('configurationDone', {})
     } catch (e) {
       console.error('[DAP] configurationDone non-fatal:', (e as Error).message)
     }
 
-    // Subscribe to thread events so getMainThreadId() has real IDs.
-    // netcoredbg sends 'thread' events on attach and as threads start/exit.
-    this.addEventListener('thread', (body: any) => {
-      if (body?.reason === 'started') {
-        this.threadMap.set(body.threadId, body.threadId.toString())
-      } else if (body?.reason === 'exited') {
-        this.threadMap.delete(body.threadId)
-      }
+    // Step 4: wait for the adapter to finish attaching to the CLR.
+    // netcoredbg sends 'process' + 'thread' events as it enumerates the attached process.
+    // Wait up to 3s for at least one thread event before seeding the thread map.
+    await this.waitForEvent('thread', 3000).catch(() => {
+      console.error('[DAP] No thread events received after attach — threads may be empty')
     })
 
-    // Seed the thread map from a live 'threads' request — captures threads
-    // that started before we registered the event listener above.
+    // Seed the thread map from a live 'threads' request to catch any threads that
+    // arrived before our listener was wired, or if no events fired.
     try {
       const threadsResp = await this.sendRequest('threads', {})
       const threads = (threadsResp.body as any)?.threads || []
       for (const t of threads) {
         this.threadMap.set(t.id, t.name ?? t.id.toString())
       }
-      console.error(`[DAP] Seeded ${this.threadMap.size} thread(s): ${[...this.threadMap.keys()].join(', ')}`)
+      console.error(`[DAP] Thread map: ${[...this.threadMap.entries()].map(([id, name]) => `${id}=${name}`).join(', ')}`)
     } catch (e) {
       console.error('[DAP] threads request non-fatal:', (e as Error).message)
     }
-
-    // When execution stops (breakpoint, pause, step), automatically capture
-    // the top frame ID so evaluate() and getVariables() have a valid context.
-    this.addEventListener('stopped', async (body: any) => {
-      const threadId: number = body?.threadId ?? this.getMainThreadId()
-      this.stoppedThreadId = threadId
-      try {
-        const resp = await this.sendRequest('stackTrace', { threadId, startFrame: 0, levels: 1 })
-        const frames = (resp.body as any)?.stackFrames ?? []
-        this.currentFrameId = frames[0]?.id ?? null
-        console.error(`[DAP] Stopped — thread ${threadId}, frame ${this.currentFrameId}, reason: ${body?.reason}`)
-      } catch (e) {
-        console.error('[DAP] Failed to capture frame on stopped event:', (e as Error).message)
-      }
-    })
   }
 
   // Handle reverse requests sent by vsdbg (e.g. the security handshake)
@@ -526,6 +510,22 @@ export class DAPDebugger extends BaseDebugAdapter {
         listeners.delete(callback)
       }
     }
+  }
+
+  /** Wait for a named DAP event, resolving with the event body. Rejects after timeoutMs. */
+  private waitForEvent(eventName: string, timeoutMs: number): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        unsub()
+        reject(new Error(`Timed out waiting for '${eventName}' event`))
+      }, timeoutMs)
+
+      const unsub = this.addEventListener(eventName, (body: unknown) => {
+        clearTimeout(timer)
+        unsub()
+        resolve(body)
+      })
+    })
   }
 
   private getMainThreadId(): number {
