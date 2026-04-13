@@ -141,8 +141,9 @@ export interface EvaluationResult {
 
 export interface Watch {
   id: string
-  expression: string
+  expr: string
   value?: string
+  type?: string
 }
 
 // .NET-specific
@@ -165,9 +166,18 @@ export interface AsyncInfo {
 }
 
 export interface MemoryStats {
-  totalHeapSize: string
-  objectCount: number
-  gcCollections: { gen0: number; gen1: number; gen2: number }
+  totalHeapSize?: string
+  totalHeap: number
+  usedHeap: number
+  objectCount?: number
+  gen0: number
+  gen1: number
+  gen2: number
+  loh: number
+  totalObjects: number
+  workingSet: number
+  peakWorkingSet: number
+  gcCollections?: { gen0: number; gen1: number; gen2: number }
 }
 
 export interface ObjectInspection {
@@ -185,14 +195,22 @@ export interface MethodTiming {
 }
 
 export interface ProfileData {
-  timestamp: Date
+  timestamp?: Date
   methodTimings: MethodTiming[]
   totalTime: number
+  elapsedTime: number
+  sampleCount: number
+  methodCount: number
+  totalAllocations: number
+  totalExceptions: number
+  topMethods: MethodTiming[]
+  callChains: string[]
 }
 
 export interface CodeEdit {
   file: string
-  startLine: number
-  endLine: number
+  startLine?: number
+  endLine?: number
   newContent: string
+  oldContent?: string
 }

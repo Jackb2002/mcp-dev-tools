@@ -57,3 +57,16 @@ export { getHealth, watchHealth } from './app'
 
 // Database
 export { getMigrationStatus, getSchemaSnapshot, updateSchemaSnapshot } from './db'
+
+// Debugger
+export {
+  IDebugAdapter,
+  BaseDebugAdapter,
+  DAPDebugger,
+  BreakpointManager,
+  StackManager,
+  WatchManager,
+  Evaluator,
+  LazyEvaluator
+} from './debugger'
+export type { ThreadInfo, FrameContext, WatchOptions, EvaluationContext } from './debugger'
