@@ -53,6 +53,7 @@ const tools: ManagedTool[] = []
 
 // Global debugger instance
 let debugger_: CoreLib.DAPDebugger | null = null
+let debuggerLastError: string | null = null
 const breakpointManager = new CoreLib.BreakpointManager()
 const stackManager = new CoreLib.StackManager()
 const watchManager = new CoreLib.WatchManager()
@@ -519,7 +520,8 @@ function initializeTools(): void {
         vsdbgPath: vsdbgPath ?? 'not found',
         appRunning: health.running,
         appPid: health.pid ?? null,
-        debuggerEnabled: config.debugger?.enabled ?? false
+        debuggerEnabled: config.debugger?.enabled ?? false,
+        lastError: debuggerLastError
       }, null, 2)
     }
   })
@@ -666,7 +668,8 @@ async function main(): Promise<void> {
             await debugger_.start()
             console.error(`[MCP Server] Debugger attached to PID ${health.pid}`)
           } catch (e) {
-            console.error('[MCP Server] Debugger attach failed (continuing without):', e)
+            debuggerLastError = (e as Error).message ?? String(e)
+            console.error('[MCP Server] Debugger attach failed (continuing without):', debuggerLastError)
             debugger_ = null
           }
         }
