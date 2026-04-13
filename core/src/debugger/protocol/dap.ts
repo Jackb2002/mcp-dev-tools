@@ -153,6 +153,29 @@ export class DAPDebugger extends BaseDebugAdapter {
     } catch (e) {
       console.error('[DAP] configurationDone non-fatal:', (e as Error).message)
     }
+
+    // Subscribe to thread events so getMainThreadId() has real IDs.
+    // netcoredbg sends 'thread' events on attach and as threads start/exit.
+    this.addEventListener('thread', (body: any) => {
+      if (body?.reason === 'started') {
+        this.threadMap.set(body.threadId, body.threadId.toString())
+      } else if (body?.reason === 'exited') {
+        this.threadMap.delete(body.threadId)
+      }
+    })
+
+    // Seed the thread map from a live 'threads' request — captures threads
+    // that started before we registered the event listener above.
+    try {
+      const threadsResp = await this.sendRequest('threads', {})
+      const threads = (threadsResp.body as any)?.threads || []
+      for (const t of threads) {
+        this.threadMap.set(t.id, t.name ?? t.id.toString())
+      }
+      console.error(`[DAP] Seeded ${this.threadMap.size} thread(s): ${[...this.threadMap.keys()].join(', ')}`)
+    } catch (e) {
+      console.error('[DAP] threads request non-fatal:', (e as Error).message)
+    }
   }
 
   // Handle reverse requests sent by vsdbg (e.g. the security handshake)
@@ -401,8 +424,8 @@ export class DAPDebugger extends BaseDebugAdapter {
         if (response.success) {
           resolve(response)
         } else {
-          reject(new Error(`DAP request ${command} failed: ${JSON.stringify(response.body)}`))
-
+          const msg = (response.body as any)?.message ?? (response.body as any)?.error?.message ?? JSON.stringify(response.body)
+          reject(new Error(`DAP request ${command} failed: ${msg}`))
         }
       })
 
