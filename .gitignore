@@ -9,12 +9,18 @@ build/
 *.tsbuildinfo
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+
+# VSCode - ignore personal settings, track workspace config
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/extensions.json
 
 # Dev tools cache
 .dev-tools/
