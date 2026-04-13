@@ -145,9 +145,14 @@ export class DAPDebugger extends BaseDebugAdapter {
     const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
     await this.sendRequest(sessionType, this.launchConfig)
 
-    // vsdbg does not send an 'initialized' event — send configurationDone
-    // immediately after attach to complete the handshake.
-    await this.sendRequest('configurationDone', {})
+    // Send configurationDone to signal end of setup. Some adapters return
+    // success:false when another debugger is already attached — treat as
+    // a non-fatal warning so the session stays usable for read operations.
+    try {
+      await this.sendRequest('configurationDone', {})
+    } catch (e) {
+      console.error('[DAP] configurationDone non-fatal:', (e as Error).message)
+    }
   }
 
   // Handle reverse requests sent by vsdbg (e.g. the security handshake)
