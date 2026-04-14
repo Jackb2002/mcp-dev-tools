@@ -72,6 +72,10 @@ export {
 } from './debugger'
 export type { ThreadInfo, FrameContext, WatchOptions, EvaluationContext } from './debugger'
 
+// Browser (CDP)
+export { getConsoleEntries, evaluateInPage, captureNetworkRequests, getRecentNetworkRequests, findCorrelatedRequest, getPageState, captureScreenshot, getStorageSnapshot, navigateTo } from './browser'
+export type { ConsoleEntry, ConsoleLevel, NetworkRequest, RequestStatus, PageState, StorageSnapshot } from './browser'
+
 // .NET debugger extensions
 export {
   RoslynAnalyzer,

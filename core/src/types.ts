@@ -14,6 +14,7 @@ export interface DevToolsConfig {
   logDir?: string
   debugLogFile?: string
   gitBaseBranch?: string
+  browserDebugPort?: number
   debugger?: DebuggerConfig
 }
 

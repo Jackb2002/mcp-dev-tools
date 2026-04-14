@@ -11,9 +11,11 @@
     "lint": "eslint src"
   },
   "dependencies": {
+    "chrome-remote-interface": "^0.34.0",
     "simple-git": "^3.20.0"
   },
   "devDependencies": {
+    "@types/chrome-remote-interface": "^0.33.0",
     "@types/jest": "^29.5.8",
     "@types/node": "^20.10.0",
     "@typescript-eslint/eslint-plugin": "^6.13.1",

@@ -882,6 +882,162 @@ function buildMemoryStats(
 }
 
 /**
+ * Initialize browser (CDP) resources and tools.
+ * Activated when config.browserDebugPort is set (typically 9222).
+ */
+function initializeBrowserResourcesAndTools(browserPort: number): void {
+  const appBaseUrl = (() => {
+    const config = CoreLib.getConfigManager().getConfig()
+    return config.appPort ? `http://localhost:${config.appPort}` : ''
+  })()
+
+  // Resource: browser console logs
+  resources.push({
+    uri: 'commsreporter://browser/console',
+    name: 'Browser Console',
+    description: 'Recent browser console entries (log, warn, error, uncaught exceptions)',
+    mimeType: 'application/json',
+    ttlMs: 5000,
+    fetch: async () => {
+      const entries = await CoreLib.getConsoleEntries(browserPort, 50)
+      return JSON.stringify(entries, null, 2)
+    }
+  })
+
+  // Resource: recent network requests
+  resources.push({
+    uri: 'commsreporter://browser/network',
+    name: 'Browser Network',
+    description: 'Recent browser network requests with status, headers, and timing',
+    mimeType: 'application/json',
+    ttlMs: 5000,
+    fetch: async () => {
+      const requests = await CoreLib.getRecentNetworkRequests(browserPort, {
+        filterUrl: appBaseUrl || undefined,
+        limit: 30
+      })
+      return JSON.stringify(requests, null, 2)
+    }
+  })
+
+  // Resource: page state
+  resources.push({
+    uri: 'commsreporter://browser/page-state',
+    name: 'Browser Page State',
+    description: 'Current browser URL, title, ready state, and viewport size',
+    mimeType: 'application/json',
+    ttlMs: 5000,
+    fetch: async () => {
+      const state = await CoreLib.getPageState(browserPort, false)
+      return JSON.stringify(state, null, 2)
+    }
+  })
+
+  // Tool: evaluate JavaScript in the page
+  tools.push({
+    name: 'browser_evaluate_js',
+    description: 'Evaluate a JavaScript expression in the current browser page context and return the result',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        expression: { type: 'string', description: 'JavaScript expression to evaluate in the page' }
+      },
+      required: ['expression']
+    },
+    handler: async (args) => {
+      try {
+        const result = await CoreLib.evaluateInPage(browserPort, String(args.expression))
+        if (result.error) return `Error: ${result.error}`
+        return `${result.result} (${result.type})`
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Tool: capture screenshot
+  tools.push({
+    name: 'browser_screenshot',
+    description: 'Capture a screenshot of the current browser page as a base64-encoded PNG',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      try {
+        const base64 = await CoreLib.captureScreenshot(browserPort)
+        return `data:image/png;base64,${base64}`
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Tool: storage snapshot (localStorage, sessionStorage, cookies)
+  tools.push({
+    name: 'browser_storage',
+    description: 'Snapshot localStorage, sessionStorage, and cookies for the current browser origin',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      try {
+        const snapshot = await CoreLib.getStorageSnapshot(browserPort)
+        return JSON.stringify(snapshot, null, 2)
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Tool: navigate
+  tools.push({
+    name: 'browser_navigate',
+    description: 'Navigate the browser to a URL',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'URL to navigate to' }
+      },
+      required: ['url']
+    },
+    handler: async (args) => {
+      try {
+        const result = await CoreLib.navigateTo(browserPort, String(args.url))
+        return result.navigated
+          ? `Navigated to ${result.finalUrl}`
+          : `Navigation failed — ended at ${result.finalUrl}`
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Tool: correlated request — find the browser request that triggered the current .NET breakpoint
+  tools.push({
+    name: 'browser_correlated_request',
+    description: 'Find the browser network request most likely responsible for the current server-side breakpoint — matches by app URL and recency',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        windowMs: { type: 'number', description: 'How far back to look in milliseconds (default 5000)' }
+      }
+    },
+    handler: async (args) => {
+      try {
+        if (!appBaseUrl) return 'Set appPort in dev-tools.config.json to enable request correlation'
+        const request = await CoreLib.findCorrelatedRequest(
+          browserPort,
+          appBaseUrl,
+          Number(args.windowMs ?? 5000)
+        )
+        if (!request) return 'No matching browser request found in the time window'
+        return JSON.stringify(request, null, 2)
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  console.error(`[MCP Server] Initialized browser resources and tools (CDP port ${browserPort})`)
+}
+
+/**
  * Fetch resource with retry logic and stale-cache fallback
  */
 async function fetchWithRetry(
@@ -1000,6 +1156,9 @@ async function main(): Promise<void> {
     initializeTools()
     if (config.language === 'dotnet') {
       initializeDotNetResourcesAndTools()
+    }
+    if (config.browserDebugPort) {
+      initializeBrowserResourcesAndTools(config.browserDebugPort)
     }
     initializeWatchers()
 
