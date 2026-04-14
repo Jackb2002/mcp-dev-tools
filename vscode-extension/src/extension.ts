@@ -20,6 +20,9 @@ const watchers: CoreLib.Unsubscribe[] = []
 const DEBUG_BRIDGE_PORT = 7891
 let debugBridgeServer: http.Server | null = null
 
+// Track breakpoints per file so setBreakpoints merges rather than replaces
+const breakpointMap = new Map<string, Set<number>>()
+
 function startDebugBridge(): void {
   if (debugBridgeServer) return
 
@@ -38,6 +41,14 @@ function startDebugBridge(): void {
     req.on('end', async () => {
       try {
         const args = body ? JSON.parse(body) : {}
+
+        if (req.url === '/breakpoints') {
+          const all: Record<string, number[]> = {}
+          breakpointMap.forEach((lines, file) => { all[file] = Array.from(lines).sort((a, b) => a - b) })
+          res.writeHead(200)
+          res.end(JSON.stringify({ breakpoints: all }))
+          return
+        }
 
         if (req.url === '/status') {
           res.writeHead(200)
@@ -96,9 +107,15 @@ function startDebugBridge(): void {
         }
 
         if (req.url === '/setBreakpoints') {
+          const file = String(args.file)
+          const line = Number(args.line)
+          // Merge with existing breakpoints for this file
+          if (!breakpointMap.has(file)) breakpointMap.set(file, new Set())
+          breakpointMap.get(file)!.add(line)
+          const lines = Array.from(breakpointMap.get(file)!)
           const result = await session.customRequest('setBreakpoints', {
-            source: { path: args.file },
-            breakpoints: [{ line: args.line }],
+            source: { path: file },
+            breakpoints: lines.map(l => ({ line: l })),
             sourceModified: false
           })
           res.writeHead(200)
@@ -107,10 +124,19 @@ function startDebugBridge(): void {
         }
 
         if (req.url === '/clearBreakpoints') {
-          // Send empty breakpoints list for the file to clear all
+          const file = String(args.file)
+          const line = args.line !== undefined ? Number(args.line) : undefined
+          if (line !== undefined) {
+            // Remove just this line
+            breakpointMap.get(file)?.delete(line)
+          } else {
+            // Clear all for file
+            breakpointMap.delete(file)
+          }
+          const lines = Array.from(breakpointMap.get(file) ?? [])
           const result = await session.customRequest('setBreakpoints', {
-            source: { path: args.file },
-            breakpoints: [],
+            source: { path: file },
+            breakpoints: lines.map(l => ({ line: l })),
             sourceModified: false
           })
           res.writeHead(200)

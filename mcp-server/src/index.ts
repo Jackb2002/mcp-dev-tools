@@ -362,9 +362,11 @@ function initializeTools(): void {
         const id = String(args.id)
         const lastColon = id.lastIndexOf(':')
         const file = id.substring(0, lastColon)
-        // Send empty breakpoints list for this file to clear all
-        await bridgeCall('/clearBreakpoints', { file })
-        return `Breakpoints cleared for ${file}`
+        const line = Number(id.substring(lastColon + 1))
+        const config = CoreLib.getConfigManager().getConfig()
+        const absFile = path.isAbsolute(file) ? file : path.join(config.workingDir, file)
+        await bridgeCall('/clearBreakpoints', { file: absFile, line })
+        return `Breakpoint cleared at ${absFile}:${line}`
       } catch (e) {
         return `Error clearing breakpoint: ${(e as Error).message}`
       }
@@ -484,6 +486,23 @@ function initializeTools(): void {
     description: 'Remove a watch expression (no-op — watches are evaluated on demand)',
     inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
     handler: async () => 'Watch removed'
+  })
+
+  // List breakpoints — shows what the bridge currently has registered
+  tools.push({
+    name: 'debugger_list_breakpoints',
+    description: 'List all breakpoints currently tracked by the debug bridge',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      try {
+        const result = await bridgeCall<{ breakpoints: Record<string, number[]> }>('/breakpoints')
+        const entries = Object.entries(result.breakpoints)
+        if (entries.length === 0) return 'No breakpoints set'
+        return entries
+          .map(([file, lines]) => `${file}\n  lines: ${lines.join(', ')}`)
+          .join('\n')
+      } catch (e) { return `Error: ${(e as Error).message}` }
+    }
   })
 
   // Status — shows bridge health + VS Code session state
