@@ -1,0 +1,19 @@
+{
+  "projectName": "MyProject",
+  "workingDir": "/path/to/your/project",
+  "language": "dotnet",
+  "appPort": 5000,
+  "buildCommand": "dotnet build MyProject.slnx",
+  "testCommand": "dotnet test",
+  "logDir": "/path/to/your/project/logs",
+  "debugLogFile": "/path/to/your/project/logs/debug.log",
+  "gitBaseBranch": "main",
+  "debugger": {
+    "enabled": true,
+    "debugPort": 5555,
+    "debugAdapter": "netcore",
+    "enableHotReload": true,
+    "captureMemoryStats": true,
+    "captureProfilingData": true
+  }
+}
