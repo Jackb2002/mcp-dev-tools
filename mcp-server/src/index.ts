@@ -629,6 +629,259 @@ function initializeTools(): void {
 }
 
 /**
+ * Initialize .NET-specific resources and tools (only when language === 'dotnet')
+ */
+function initializeDotNetResourcesAndTools(): void {
+  // Resource: GC / heap stats snapshot
+  resources.push({
+    uri: 'commsreporter://debugger/dotnet/memory-stats',
+    name: '.NET Memory Stats',
+    description: 'GC heap size and per-generation collection counts from the live debug session',
+    mimeType: 'application/json',
+    ttlMs: 5000,
+    fetch: async () => {
+      try {
+        const [totalMem, gen0, gen1, gen2, workingSet] = await Promise.all([
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.GetTotalMemory(false).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.CollectionCount(0).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.CollectionCount(1).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.CollectionCount(2).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'Environment.WorkingSet.ToString()', context: 'repl' })
+        ])
+        const stats = buildMemoryStats(totalMem.result, gen0.result, gen1.result, gen2.result, workingSet.result)
+        return JSON.stringify(stats, null, 2)
+      } catch (e) {
+        return JSON.stringify({ error: (e as Error).message })
+      }
+    }
+  })
+
+  // Tool: rich type inspection
+  tools.push({
+    name: 'debugger_dotnet_type_info',
+    description: 'Get rich .NET type information for a variable — full type name, base type, interfaces, generics',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        variable: { type: 'string', description: 'Variable name to inspect' },
+        frameId: { type: 'number', description: 'Stack frame ID (optional, defaults to top stopped frame)' }
+      },
+      required: ['variable']
+    },
+    handler: async (args) => {
+      try {
+        const varName = String(args.variable)
+        const frameId = args.frameId as number | undefined
+
+        const [fullType, baseType, interfaces, isValueType] = await Promise.all([
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.GetType().FullName`, frameId, context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.GetType().BaseType?.FullName ?? "(none)"`, frameId, context: 'repl' }).catch(() => ({ result: '(none)' })),
+          bridgeCall<{ result: string }>('/evaluate', { expression: `string.Join(", ", ${varName}.GetType().GetInterfaces().Select(i => i.Name))`, frameId, context: 'repl' }).catch(() => ({ result: '' })),
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.GetType().IsValueType.ToString()`, frameId, context: 'repl' }).catch(() => ({ result: 'False' }))
+        ])
+
+        const variable: CoreLib.Variable = { name: varName, value: '', type: fullType.result, variablesReference: 0 }
+        const typeInfo = CoreLib.RoslynAnalyzer.getTypeInfo(variable)
+        const parsedInterfaces = interfaces.result ? interfaces.result.split(', ').filter(Boolean) : []
+
+        return JSON.stringify({
+          variable: varName,
+          fullType: fullType.result,
+          baseType: baseType.result,
+          interfaces: parsedInterfaces,
+          isValueType: isValueType.result === 'True',
+          isGeneric: typeInfo.isGeneric,
+          genericArguments: typeInfo.genericArguments,
+          isNullable: typeInfo.isNullable,
+          hierarchy: CoreLib.RoslynAnalyzer.getHierarchy({
+            ...typeInfo,
+            baseName: baseType.result !== '(none)' ? baseType.result : undefined,
+            interfaces: parsedInterfaces
+          })
+        }, null, 2)
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Tool: Task / async state inspection
+  tools.push({
+    name: 'debugger_dotnet_async_inspect',
+    description: 'Inspect the status and state of a Task or async variable in the current debug frame',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        variable: { type: 'string', description: 'Task or async variable name' },
+        frameId: { type: 'number', description: 'Stack frame ID (optional)' }
+      },
+      required: ['variable']
+    },
+    handler: async (args) => {
+      try {
+        const varName = String(args.variable)
+        const frameId = args.frameId as number | undefined
+
+        const [status, isCompleted, isFaulted, isCanceled, exception] = await Promise.all([
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.Status.ToString()`, frameId, context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.IsCompleted.ToString()`, frameId, context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.IsFaulted.ToString()`, frameId, context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.IsCanceled.ToString()`, frameId, context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: `${varName}.Exception?.InnerException?.Message ?? ${varName}.Exception?.Message ?? "(none)"`, frameId, context: 'repl' }).catch(() => ({ result: '(none)' }))
+        ])
+
+        const variable: CoreLib.Variable = { name: varName, value: status.result, type: 'Task', variablesReference: 0 }
+        const taskInfo = CoreLib.TaskInspector.getTaskInfo(variable)
+        taskInfo.isCompleted = isCompleted.result === 'True'
+        taskInfo.isFaulted = isFaulted.result === 'True'
+        taskInfo.isCanceled = isCanceled.result === 'True'
+        const awaiterState = CoreLib.TaskInspector.getAwaiterState(taskInfo)
+
+        const asyncState: CoreLib.AsyncMethodState = {
+          methodName: varName,
+          stateMachineType: 'Task',
+          currentState: 0,
+          humanReadableState: status.result,
+          stateName: status.result,
+          isCompleted: taskInfo.isCompleted,
+          isFaulted: taskInfo.isFaulted,
+          isCancelled: taskInfo.isCanceled,
+          awaiterState,
+          awaiterType: 'Task',
+          pendingContinuations: []
+        }
+
+        return JSON.stringify({
+          variable: varName,
+          status: status.result,
+          isCompleted: taskInfo.isCompleted,
+          isFaulted: taskInfo.isFaulted,
+          isCanceled: taskInfo.isCanceled,
+          awaiterState,
+          exception: exception.result !== '(none)' ? exception.result : null,
+          summary: CoreLib.AsyncStateAnalyzer.describeAsyncState(asyncState),
+          advice: CoreLib.AsyncFlowAnalyzer.getAdvice(asyncState)
+        }, null, 2)
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Tool: LINQ / IEnumerable analysis
+  tools.push({
+    name: 'debugger_dotnet_linq_analyze',
+    description: 'Analyze a LINQ expression or IEnumerable variable — detects operators, counts elements, and suggests optimizations',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        expression: { type: 'string', description: 'Variable name or LINQ expression to analyze' },
+        frameId: { type: 'number', description: 'Stack frame ID (optional)' },
+        countElements: { type: 'boolean', description: 'Materialize and count elements (may be slow for large sequences, default true)' }
+      },
+      required: ['expression']
+    },
+    handler: async (args) => {
+      try {
+        const expression = String(args.expression)
+        const frameId = args.frameId as number | undefined
+        const countElements = args.countElements !== false
+
+        const typeResult = await bridgeCall<{ result: string }>('/evaluate', {
+          expression: `(${expression}).GetType().Name`,
+          frameId,
+          context: 'repl'
+        }).catch(() => ({ result: 'Unknown' }))
+
+        const variable: CoreLib.Variable = { name: expression, value: '', type: typeResult.result, variablesReference: 0 }
+        const linqInfo = CoreLib.LINQEvaluator.analyzeLINQVariable(variable)
+        const detectedOperators = CoreLib.LINQEvaluator.detectOperators(expression)
+        const suggestions = CoreLib.LINQEvaluator.suggestOptimizations({ ...linqInfo, chainLength: detectedOperators.length + 1 })
+
+        let count: number | null = null
+        if (countElements) {
+          const countResult = await bridgeCall<{ result: string }>('/evaluate', {
+            expression: `System.Linq.Enumerable.Count(${expression})`,
+            frameId,
+            context: 'repl'
+          }).catch(() => ({ result: '' }))
+          const parsed = parseInt(countResult.result)
+          if (!isNaN(parsed)) count = parsed
+        }
+
+        return JSON.stringify({
+          expression,
+          type: typeResult.result,
+          isIEnumerable: linqInfo.isIEnumerable,
+          isIQueryable: linqInfo.isIQueryable,
+          isAsync: linqInfo.isAsync,
+          elementType: linqInfo.elementType,
+          detectedOperators,
+          count,
+          suggestions
+        }, null, 2)
+      } catch (e) {
+        return `Error: ${(e as Error).message}`
+      }
+    }
+  })
+
+  // Tool: GC / memory stats on demand
+  tools.push({
+    name: 'debugger_dotnet_memory_stats',
+    description: 'Get .NET GC heap size and collection counts from the live debug session',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      try {
+        const [totalMem, gen0, gen1, gen2, workingSet] = await Promise.all([
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.GetTotalMemory(false).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.CollectionCount(0).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.CollectionCount(1).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'GC.CollectionCount(2).ToString()', context: 'repl' }),
+          bridgeCall<{ result: string }>('/evaluate', { expression: 'Environment.WorkingSet.ToString()', context: 'repl' })
+        ])
+        const stats = buildMemoryStats(totalMem.result, gen0.result, gen1.result, gen2.result, workingSet.result)
+        return JSON.stringify(stats, null, 2)
+      } catch (e) {
+        return `Error getting memory stats: ${(e as Error).message}`
+      }
+    }
+  })
+
+  console.error('[MCP Server] Initialized .NET resources and tools')
+}
+
+/**
+ * Build memory stats object with GC analysis
+ */
+function buildMemoryStats(
+  totalMemStr: string, gen0Str: string, gen1Str: string, gen2Str: string, workingSetStr: string
+): Record<string, unknown> {
+  const totalHeapBytes = parseInt(totalMemStr) || 0
+  const gen0Collections = parseInt(gen0Str) || 0
+  const gen1Collections = parseInt(gen1Str) || 0
+  const gen2Collections = parseInt(gen2Str) || 0
+  const workingSetBytes = parseInt(workingSetStr) || 0
+
+  const gcStats: CoreLib.GCGenerationStats[] = [
+    { generation: 0, collectionCount: gen0Collections, totalMemory: 0, liveObjectCount: 0, deadObjectCount: 0, promotedSize: 0 },
+    { generation: 1, collectionCount: gen1Collections, totalMemory: 0, liveObjectCount: 0, deadObjectCount: 0, promotedSize: 0 },
+    { generation: 2, collectionCount: gen2Collections, totalMemory: 0, liveObjectCount: 0, deadObjectCount: 0, promotedSize: 0 }
+  ]
+
+  return {
+    totalHeapBytes,
+    totalHeapMB: (totalHeapBytes / 1024 / 1024).toFixed(2) + ' MB',
+    gen0Collections,
+    gen1Collections,
+    gen2Collections,
+    workingSetBytes,
+    workingSetMB: (workingSetBytes / 1024 / 1024).toFixed(2) + ' MB',
+    analysis: CoreLib.GCAnalyzer.analyzeCollectionStats(gcStats)
+  }
+}
+
+/**
  * Fetch resource with retry logic and stale-cache fallback
  */
 async function fetchWithRetry(
@@ -745,6 +998,9 @@ async function main(): Promise<void> {
     // Initialize resources and tools
     initializeResources()
     initializeTools()
+    if (config.language === 'dotnet') {
+      initializeDotNetResourcesAndTools()
+    }
     initializeWatchers()
 
     // Attach debugger to running process if enabled

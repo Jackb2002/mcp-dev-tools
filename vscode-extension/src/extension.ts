@@ -371,12 +371,14 @@ function registerTreeViews(context: vscode.ExtensionContext): void {
  * Start background watchers
  */
 function startWatchers(): void {
-  // Watch git changes
+  // Watch git index/HEAD changes → refresh git sidebar
   try {
-    const unsubGit = CoreLib.watchDebugLog(() => {
-      vscode.commands.executeCommand('devTools.refreshGit')
-    })
-    watchers.push(unsubGit)
+    const gitWatcher = vscode.workspace.createFileSystemWatcher('**/.git/{HEAD,index}')
+    const refreshGit = () => vscode.commands.executeCommand('devTools.refreshGit')
+    gitWatcher.onDidChange(refreshGit)
+    gitWatcher.onDidCreate(refreshGit)
+    gitWatcher.onDidDelete(refreshGit)
+    watchers.push(() => gitWatcher.dispose())
   } catch (e) {
     console.warn('[Dev Tools] Git watcher failed:', e)
   }

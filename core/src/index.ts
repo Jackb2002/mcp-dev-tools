@@ -71,3 +71,44 @@ export {
   LazyEvaluator
 } from './debugger'
 export type { ThreadInfo, FrameContext, WatchOptions, EvaluationContext } from './debugger'
+
+// .NET debugger extensions
+export {
+  RoslynAnalyzer,
+  MethodInspector,
+  AsyncStateAnalyzer,
+  TaskInspector,
+  AsyncFlowAnalyzer,
+  AwaiterState,
+  LINQEvaluator,
+  LINQQueryEvaluator,
+  LINQStage,
+  MemoryInspector,
+  GCAnalyzer,
+  MemoryTracker,
+  HotReloadManager,
+  EditAndContinueValidator,
+  PerformanceProfiler,
+  PerformanceAnalyzer
+} from './debugger'
+export type {
+  RoslynTypeInfo,
+  RoslynMember,
+  RoslynMethod,
+  RoslynParameter,
+  RoslynAttribute,
+  AsyncMethodState,
+  Continuation,
+  TaskInfo,
+  LINQEnumerableInfo,
+  ObjectReference,
+  GCGenerationStats,
+  HeapSnapshot,
+  MemoryGrowth,
+  HotReloadCapability,
+  HotReloadChange,
+  HotReloadSession,
+  CallGraph,
+  ExecutionSample,
+  MethodStats
+} from './debugger'
