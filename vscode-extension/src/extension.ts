@@ -5,9 +5,179 @@
 
 import * as vscode from 'vscode'
 import * as CoreLib from '@dev-tools/core'
+import * as http from 'http'
 
 let config: CoreLib.DevToolsConfig | null = null
 const watchers: CoreLib.Unsubscribe[] = []
+
+// ---------------------------------------------------------------------------
+// Debug Bridge — local HTTP server on port 7891 that exposes the active VS
+// Code debug session to the MCP server. The MCP calls these endpoints instead
+// of trying to run its own DAP connection (which fails on macOS arm64 due to
+// netcoredbg architecture limitations and vsdbg license restrictions).
+// ---------------------------------------------------------------------------
+
+const DEBUG_BRIDGE_PORT = 7891
+let debugBridgeServer: http.Server | null = null
+
+function startDebugBridge(): void {
+  if (debugBridgeServer) return
+
+  debugBridgeServer = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
+    res.setHeader('Content-Type', 'application/json')
+
+    const session = vscode.debug.activeDebugSession
+    if (!session) {
+      res.writeHead(503)
+      res.end(JSON.stringify({ error: 'No active debug session' }))
+      return
+    }
+
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
+    req.on('end', async () => {
+      try {
+        const args = body ? JSON.parse(body) : {}
+
+        if (req.url === '/status') {
+          res.writeHead(200)
+          res.end(JSON.stringify({
+            active: true,
+            sessionId: session.id,
+            sessionName: session.name,
+            sessionType: session.type
+          }))
+          return
+        }
+
+        if (req.url === '/threads') {
+          const result = await session.customRequest('threads', {})
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/stackTrace') {
+          const result = await session.customRequest('stackTrace', {
+            threadId: args.threadId ?? 1,
+            startFrame: 0,
+            levels: args.levels ?? 20
+          })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/evaluate') {
+          const result = await session.customRequest('evaluate', {
+            expression: args.expression,
+            frameId: args.frameId,
+            context: args.context ?? 'watch'
+          })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/scopes') {
+          const result = await session.customRequest('scopes', { frameId: args.frameId })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/variables') {
+          const result = await session.customRequest('variables', {
+            variablesReference: args.variablesReference
+          })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/setBreakpoints') {
+          const result = await session.customRequest('setBreakpoints', {
+            source: { path: args.file },
+            breakpoints: [{ line: args.line }],
+            sourceModified: false
+          })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/clearBreakpoints') {
+          // Send empty breakpoints list for the file to clear all
+          const result = await session.customRequest('setBreakpoints', {
+            source: { path: args.file },
+            breakpoints: [],
+            sourceModified: false
+          })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/continue') {
+          const result = await session.customRequest('continue', { threadId: args.threadId ?? 1 })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/pause') {
+          const result = await session.customRequest('pause', { threadId: args.threadId ?? 1 })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/next') {
+          const result = await session.customRequest('next', { threadId: args.threadId ?? 1 })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/stepIn') {
+          const result = await session.customRequest('stepIn', { threadId: args.threadId ?? 1 })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/stepOut') {
+          const result = await session.customRequest('stepOut', { threadId: args.threadId ?? 1 })
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        if (req.url === '/loadedSources') {
+          const result = await session.customRequest('loadedSources', {})
+          res.writeHead(200)
+          res.end(JSON.stringify(result))
+          return
+        }
+
+        res.writeHead(404)
+        res.end(JSON.stringify({ error: `Unknown endpoint: ${req.url}` }))
+      } catch (e) {
+        res.writeHead(500)
+        res.end(JSON.stringify({ error: (e as Error).message }))
+      }
+    })
+  })
+
+  debugBridgeServer.listen(DEBUG_BRIDGE_PORT, '127.0.0.1', () => {
+    console.log(`[Dev Tools] Debug bridge listening on port ${DEBUG_BRIDGE_PORT}`)
+    vscode.window.setStatusBarMessage(`Dev Tools debug bridge: port ${DEBUG_BRIDGE_PORT}`, 5000)
+  })
+
+  debugBridgeServer.on('error', (e: Error) => {
+    console.error('[Dev Tools] Debug bridge error:', e)
+  })
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
 
@@ -37,6 +207,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Start watchers
     startWatchers()
+
+    // Start debug bridge so MCP tools can use the active VS Code debug session
+    startDebugBridge()
+    context.subscriptions.push({
+      dispose: () => {
+        if (debugBridgeServer) {
+          debugBridgeServer.close()
+          debugBridgeServer = null
+        }
+      }
+    })
 
     console.log('[Dev Tools] Extension activated successfully')
   } catch (error) {

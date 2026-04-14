@@ -16,7 +16,47 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import * as path from 'path'
+import * as http from 'http'
 import * as CoreLib from '@dev-tools/core'
+
+// ---------------------------------------------------------------------------
+// Debug Bridge client — talks to the VS Code extension's local HTTP server
+// (port 7891) which proxies requests through vscode.debug.activeDebugSession.
+// This avoids the arm64/license issues with running our own DAP connection.
+// ---------------------------------------------------------------------------
+const DEBUG_BRIDGE_PORT = 7891
+
+async function bridgeCall<T>(endpoint: string, body?: Record<string, unknown>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : ''
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: DEBUG_BRIDGE_PORT,
+      path: endpoint,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      }
+    }, (res) => {
+      let data = ''
+      res.on('data', (chunk: Buffer) => { data += chunk.toString() })
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data)
+          if (parsed.error) reject(new Error(parsed.error))
+          else resolve(parsed as T)
+        } catch (e) {
+          reject(new Error(`Bridge parse error: ${data}`))
+        }
+      })
+    })
+    req.on('error', (e: Error) => reject(new Error(`Debug bridge unavailable: ${e.message}. Start a debug session in VS Code (F5) first.`)))
+    req.setTimeout(5000, () => { req.destroy(); reject(new Error('Debug bridge timed out')) })
+    req.write(payload)
+    req.end()
+  })
+}
 
 /**
  * Resource definitions
@@ -52,9 +92,8 @@ interface ManagedTool {
 
 const tools: ManagedTool[] = []
 
-// Global debugger instance
+// Global debugger instance (kept for potential future use; bridge is primary path)
 let debugger_: CoreLib.DAPDebugger | null = null
-let debuggerLastError: string | null = null
 const breakpointManager = new CoreLib.BreakpointManager()
 const stackManager = new CoreLib.StackManager()
 const watchManager = new CoreLib.WatchManager()
@@ -277,370 +316,293 @@ function initializeResources(): void {
  * Initialize all debugger tools
  */
 function initializeTools(): void {
-  // Set breakpoint tool
+  // Set breakpoint — routes through VS Code debug bridge
   tools.push({
     name: 'debugger_set_breakpoint',
-    description: 'Set a breakpoint at a specific file and line',
+    description: 'Set a breakpoint at a specific file and line (requires an active VS Code debug session)',
     inputSchema: {
       type: 'object',
       properties: {
-        file: { type: 'string', description: 'File path' },
+        file: { type: 'string', description: 'File path (relative to project root or absolute)' },
         line: { type: 'number', description: 'Line number' }
       },
       required: ['file', 'line']
     },
     handler: async (args) => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
       try {
         const config = CoreLib.getConfigManager().getConfig()
         const file = path.isAbsolute(String(args.file))
           ? String(args.file)
           : path.join(config.workingDir, String(args.file))
-        const bp = await debugger_.setBreakpoint(file, Number(args.line))
-        breakpointManager.add(bp)
-        return `Breakpoint set at ${file}:${args.line} (verified: ${bp.verified})`
+        const result = await bridgeCall<{ breakpoints?: Array<{ verified: boolean; line: number }> }>(
+          '/setBreakpoints', { file, line: Number(args.line) }
+        )
+        const bp = result.breakpoints?.[0]
+        return `Breakpoint set at ${file}:${args.line} (verified: ${bp?.verified ?? false})`
       } catch (e) {
         return `Error setting breakpoint: ${(e as Error).message}`
       }
     }
   })
 
-  // Clear breakpoint tool
+  // Clear breakpoint — VS Code API manages breakpoints via setBreakpoints with empty list
   tools.push({
     name: 'debugger_clear_breakpoint',
-    description: 'Clear a breakpoint by ID',
+    description: 'Clear a breakpoint — pass the file path and line as "file:line"',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'Breakpoint ID' }
+        id: { type: 'string', description: 'Breakpoint ID in the form "file:line" (from set_breakpoint)' }
       },
       required: ['id']
     },
     handler: async (args) => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
       try {
-        await debugger_.clearBreakpoint(String(args.id))
-        breakpointManager.remove(String(args.id))
-        return `Breakpoint cleared: ${args.id}`
+        // id format: "file:line"
+        const id = String(args.id)
+        const lastColon = id.lastIndexOf(':')
+        const file = id.substring(0, lastColon)
+        // Send empty breakpoints list for this file to clear all
+        await bridgeCall('/clearBreakpoints', { file })
+        return `Breakpoints cleared for ${file}`
       } catch (e) {
         return `Error clearing breakpoint: ${(e as Error).message}`
       }
     }
   })
 
-  // Continue execution tool
+  // Continue
   tools.push({
     name: 'debugger_continue',
     description: 'Continue execution until next breakpoint',
-    inputSchema: {
-      type: 'object',
-      properties: {}
-    },
-    handler: async () => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
+    inputSchema: { type: 'object', properties: { threadId: { type: 'number' } } },
+    handler: async (args) => {
       try {
-        await debugger_.continue()
+        await bridgeCall('/continue', { threadId: args.threadId })
         return 'Execution continued'
-      } catch (e) {
-        return `Error continuing: ${(e as Error).message}`
-      }
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Pause execution tool
+  // Pause
   tools.push({
     name: 'debugger_pause',
     description: 'Pause execution',
-    inputSchema: {
-      type: 'object',
-      properties: {}
-    },
-    handler: async () => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
+    inputSchema: { type: 'object', properties: { threadId: { type: 'number' } } },
+    handler: async (args) => {
       try {
-        await debugger_.pause()
+        await bridgeCall('/pause', { threadId: args.threadId })
         return 'Execution paused'
-      } catch (e) {
-        return `Error pausing: ${(e as Error).message}`
-      }
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Step over tool
+  // Step over
   tools.push({
     name: 'debugger_step_over',
     description: 'Step over current line',
-    inputSchema: {
-      type: 'object',
-      properties: {}
-    },
-    handler: async () => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
+    inputSchema: { type: 'object', properties: { threadId: { type: 'number' } } },
+    handler: async (args) => {
       try {
-        await debugger_.stepOver()
+        await bridgeCall('/next', { threadId: args.threadId })
         return 'Stepped over'
-      } catch (e) {
-        return `Error stepping: ${(e as Error).message}`
-      }
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Step into tool
+  // Step into
   tools.push({
     name: 'debugger_step_into',
     description: 'Step into current line',
-    inputSchema: {
-      type: 'object',
-      properties: {}
-    },
-    handler: async () => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
+    inputSchema: { type: 'object', properties: { threadId: { type: 'number' } } },
+    handler: async (args) => {
       try {
-        await debugger_.stepInto()
+        await bridgeCall('/stepIn', { threadId: args.threadId })
         return 'Stepped into'
-      } catch (e) {
-        return `Error stepping: ${(e as Error).message}`
-      }
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Step out tool
+  // Step out
   tools.push({
     name: 'debugger_step_out',
     description: 'Step out of current function',
-    inputSchema: {
-      type: 'object',
-      properties: {}
-    },
-    handler: async () => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
+    inputSchema: { type: 'object', properties: { threadId: { type: 'number' } } },
+    handler: async (args) => {
       try {
-        await debugger_.stepOut()
+        await bridgeCall('/stepOut', { threadId: args.threadId })
         return 'Stepped out'
-      } catch (e) {
-        return `Error stepping: ${(e as Error).message}`
-      }
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Evaluate expression tool
+  // Evaluate
   tools.push({
     name: 'debugger_evaluate',
-    description: 'Evaluate an expression in the current context',
+    description: 'Evaluate an expression in the current debug context (requires active paused session)',
     inputSchema: {
       type: 'object',
       properties: {
-        expression: { type: 'string', description: 'Expression to evaluate' }
+        expression: { type: 'string', description: 'C# expression to evaluate' },
+        frameId: { type: 'number', description: 'Stack frame ID (optional)' }
       },
       required: ['expression']
     },
     handler: async (args) => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
       try {
-        const result = await debugger_.evaluate(String(args.expression))
-        return `${result.value} (${result.type})`
-      } catch (e) {
-        return `Error evaluating: ${(e as Error).message}`
-      }
+        const result = await bridgeCall<{ result: string; type: string }>('/evaluate', {
+          expression: String(args.expression),
+          frameId: args.frameId
+        })
+        return `${result.result} (${result.type})`
+      } catch (e) { return `Error evaluating: ${(e as Error).message}` }
     }
   })
 
-  // Add watch tool
+  // Watches — just evaluate immediately since VS Code session handles state
   tools.push({
     name: 'debugger_add_watch',
-    description: 'Add a watch expression',
+    description: 'Evaluate a watch expression in the current debug context',
     inputSchema: {
       type: 'object',
-      properties: {
-        expression: { type: 'string', description: 'Expression to watch' }
-      },
+      properties: { expression: { type: 'string', description: 'Expression to watch' } },
       required: ['expression']
     },
     handler: async (args) => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
       try {
-        const watch = await debugger_.addWatch(String(args.expression))
-        watchManager.add(args.expression as string)
-        return `Watch added: ${watch.id}`
-      } catch (e) {
-        return `Error adding watch: ${(e as Error).message}`
-      }
+        const result = await bridgeCall<{ result: string; type: string }>('/evaluate', {
+          expression: String(args.expression),
+          context: 'watch'
+        })
+        return `${args.expression} = ${result.result} (${result.type})`
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Remove watch tool
   tools.push({
     name: 'debugger_remove_watch',
-    description: 'Remove a watch expression',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string', description: 'Watch ID' }
-      },
-      required: ['id']
-    },
-    handler: async (args) => {
-      if (!debugger_) {
-        return 'Debugger not running'
-      }
-      try {
-        await debugger_.removeWatch(String(args.id))
-        watchManager.remove(String(args.id))
-        return `Watch removed: ${args.id}`
-      } catch (e) {
-        return `Error removing watch: ${(e as Error).message}`
-      }
-    }
+    description: 'Remove a watch expression (no-op — watches are evaluated on demand)',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    handler: async () => 'Watch removed'
   })
 
-  // Debugger status tool — always available, shows connection state
+  // Status — shows bridge health + VS Code session state
   tools.push({
     name: 'debugger_status',
-    description: 'Show debugger connection status, adapter path, attached PID, thread map, and current stopped context',
+    description: 'Show debug bridge status and active VS Code debug session info',
     inputSchema: { type: 'object', properties: {} },
     handler: async () => {
       const config = CoreLib.getConfigManager().getConfig()
-      const adapter = CoreLib.findDebugAdapter()
       const health = await CoreLib.getHealth(config.appPort)
-      const threads = debugger_?.getThreadMap()
-      const stopped = debugger_?.getStoppedContext()
-      return JSON.stringify({
-        connected: debugger_ !== null && debugger_.isRunning(),
-        adapterKind: adapter?.kind ?? 'not found',
-        adapterPath: adapter?.path ?? 'not found',
-        appRunning: health.running,
-        appPid: health.pid ?? null,
-        debuggerEnabled: config.debugger?.enabled ?? false,
-        lastError: debuggerLastError,
-        threadMap: threads ? Object.fromEntries(threads) : null,
-        stoppedContext: stopped ?? null
-      }, null, 2)
+      try {
+        const session = await bridgeCall<{ active: boolean; sessionId: string; sessionName: string; sessionType: string }>('/status')
+        return JSON.stringify({
+          bridgeConnected: true,
+          debugSessionActive: session.active,
+          sessionName: session.sessionName,
+          sessionType: session.sessionType,
+          appRunning: health.running,
+          appPid: health.pid ?? null,
+          note: 'Debug operations route through VS Code active debug session'
+        }, null, 2)
+      } catch {
+        return JSON.stringify({
+          bridgeConnected: false,
+          debugSessionActive: false,
+          appRunning: health.running,
+          appPid: health.pid ?? null,
+          note: 'Start the Dev Tools VS Code extension and press F5 to enable debugging'
+        }, null, 2)
+      }
     }
   })
 
-  // List live threads
+  // Threads
   tools.push({
     name: 'debugger_threads',
-    description: 'List all active threads in the attached process with their IDs and names',
+    description: 'List active threads from the VS Code debug session',
     inputSchema: { type: 'object', properties: {} },
     handler: async () => {
-      if (!debugger_) return 'Debugger not connected'
       try {
-        const threads = await debugger_.listThreads()
-        return JSON.stringify(threads, null, 2)
-      } catch (e) {
-        return `Error listing threads: ${(e as Error).message}`
-      }
+        const result = await bridgeCall<{ threads: Array<{ id: number; name: string }> }>('/threads')
+        return JSON.stringify(result.threads, null, 2)
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Get stack trace
+  // Stack trace
   tools.push({
     name: 'debugger_stack_trace',
-    description: 'Get the current call stack (only works when paused at a breakpoint or after pause)',
+    description: 'Get call stack from the VS Code debug session (requires paused execution)',
     inputSchema: {
       type: 'object',
       properties: {
-        threadId: { type: 'number', description: 'Thread ID (optional — defaults to stopped thread)' }
+        threadId: { type: 'number', description: 'Thread ID (optional)' },
+        levels: { type: 'number', description: 'Max frames to return (default 20)' }
       }
     },
     handler: async (args) => {
-      if (!debugger_) return 'Debugger not connected'
       try {
-        const frames = await debugger_.getFullStackTrace(args.threadId as number | undefined)
-        return JSON.stringify(frames, null, 2)
-      } catch (e) {
-        return `Error getting stack: ${(e as Error).message}`
-      }
-    }
-  })
-
-  // List loaded sources (diagnostic — shows what paths netcoredbg knows about)
-  tools.push({
-    name: 'debugger_loaded_sources',
-    description: 'List all source files loaded by the debug adapter — use this to diagnose breakpoint path mismatches',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => {
-      if (!debugger_) return 'Debugger not connected'
-      try {
-        const sources = await debugger_.getLoadedSources()
-        return JSON.stringify(sources, null, 2)
-      } catch (e) {
-        return `Error listing sources: ${(e as Error).message}`
-      }
-    }
-  })
-
-  // Reconnect debugger without restarting the MCP
-  tools.push({
-    name: 'debugger_reconnect',
-    description: 'Stop the current debug session and reattach to the running app — use after app restarts',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => {
-      const config = CoreLib.getConfigManager().getConfig()
-      try {
-        if (debugger_) {
-          try { await debugger_.stop() } catch { /* ignore stop errors */ }
-          debugger_ = null
-        }
-        const adapter = CoreLib.findDebugAdapter()
-        if (!adapter) return 'No debug adapter found'
-        const health = await CoreLib.getHealth(config.appPort)
-        if (!health.pid) return 'App not running — start the app first'
-        debugger_ = new CoreLib.DAPDebugger(adapter.path, {
-          request: 'attach',
-          processId: health.pid,
-          justMyCode: false
+        const result = await bridgeCall<{ stackFrames: unknown[] }>('/stackTrace', {
+          threadId: args.threadId,
+          levels: args.levels ?? 20
         })
-        await debugger_.start()
-        debuggerLastError = null
-        return `Reconnected ${adapter.kind} to PID ${health.pid}`
-      } catch (e) {
-        debuggerLastError = (e as Error).message
-        debugger_ = null
-        return `Reconnect failed: ${(e as Error).message}`
-      }
+        return JSON.stringify(result.stackFrames, null, 2)
+      } catch (e) { return `Error: ${(e as Error).message}` }
     }
   })
 
-  // Get variables for current frame
+  // Variables
   tools.push({
     name: 'debugger_variables',
-    description: 'Get local variables in the current stack frame (only works when paused)',
+    description: 'Get local variables for a stack frame (requires paused execution)',
     inputSchema: {
       type: 'object',
       properties: {
-        frameId: { type: 'number', description: 'Frame ID from stack trace (optional — defaults to current frame)' }
-      }
+        frameId: { type: 'number', description: 'Frame ID from stack trace' }
+      },
+      required: ['frameId']
     },
     handler: async (args) => {
-      if (!debugger_) return 'Debugger not connected'
       try {
-        const stopped = debugger_.getStoppedContext()
-        const frameId = (args.frameId as number | undefined) ?? stopped.frameId
-        if (frameId === null) return 'Not paused — no active frame context'
-        const vars = await debugger_.getVariables(frameId)
-        return JSON.stringify(vars, null, 2)
+        // Get scopes first, then variables from local scope
+        const scopesResult = await bridgeCall<{ scopes: Array<{ variablesReference: number; name: string }> }>(
+          '/scopes', { frameId: Number(args.frameId) }
+        )
+        const localScope = scopesResult.scopes.find(s => s.name === 'Locals') ?? scopesResult.scopes[0]
+        if (!localScope) return 'No scopes available'
+        const varsResult = await bridgeCall<{ variables: unknown[] }>(
+          '/variables', { variablesReference: localScope.variablesReference }
+        )
+        return JSON.stringify(varsResult.variables, null, 2)
+      } catch (e) { return `Error: ${(e as Error).message}` }
+    }
+  })
+
+  // Loaded sources
+  tools.push({
+    name: 'debugger_loaded_sources',
+    description: 'List source files known to the VS Code debug session',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      try {
+        const result = await bridgeCall<{ sources: Array<{ name: string; path: string }> }>('/loadedSources')
+        return JSON.stringify(result.sources, null, 2)
+      } catch (e) { return `Error: ${(e as Error).message}` }
+    }
+  })
+
+  // Reconnect — just checks bridge health now
+  tools.push({
+    name: 'debugger_reconnect',
+    description: 'Check debug bridge connectivity — debugging now routes through VS Code session',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      try {
+        const session = await bridgeCall<{ sessionName: string }>('/status')
+        return `Bridge connected — active session: ${session.sessionName}`
       } catch (e) {
-        return `Error getting variables: ${(e as Error).message}`
+        return `Bridge not available: ${(e as Error).message}\nEnsure the Dev Tools VS Code extension is active and a debug session is running (F5).`
       }
     }
   })
@@ -788,8 +750,7 @@ async function main(): Promise<void> {
             await debugger_.start()
             console.error(`[MCP Server] Debugger attached to PID ${health.pid}`)
           } catch (e) {
-            debuggerLastError = (e as Error).message ?? String(e)
-            console.error('[MCP Server] Debugger attach failed (continuing without):', debuggerLastError)
+            console.error('[MCP Server] Debugger attach failed (continuing without):', (e as Error).message ?? String(e))
             debugger_ = null
           }
         }
