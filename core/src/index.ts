@@ -53,7 +53,21 @@ export { getUsage, getLargeFiles, getCleanupSuggestions } from './disk'
 export { trackBuild, getRecentBuilds } from './build'
 
 // App
-export { getHealth, watchHealth } from './app'
+export { getHealth, watchHealth, findVsdbgPath, findDebugAdapter } from './app'
+export type { DebugAdapterInfo } from './app'
 
 // Database
 export { getMigrationStatus, getSchemaSnapshot, updateSchemaSnapshot } from './db'
+
+// Debugger
+export {
+  IDebugAdapter,
+  BaseDebugAdapter,
+  DAPDebugger,
+  BreakpointManager,
+  StackManager,
+  WatchManager,
+  Evaluator,
+  LazyEvaluator
+} from './debugger'
+export type { ThreadInfo, FrameContext, WatchOptions, EvaluationContext } from './debugger'

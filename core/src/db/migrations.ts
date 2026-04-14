@@ -9,7 +9,7 @@ import { execSafe } from '../utils'
 /**
  * Get EF Core migration status
  */
-export async function getMigrationStatus(cwd?: string): Promise<{ pending: Migration[]; applied: Migration[] }> {
+export async function getMigrationStatus(cwd?: string): Promise<{ pending: Migration[]; applied: Migration[]; _error?: string }> {
   const config = getConfigManager(cwd).getConfig()
 
   if (config.language !== 'dotnet') {
@@ -57,7 +57,8 @@ export async function getMigrationStatus(cwd?: string): Promise<{ pending: Migra
   } catch (error) {
     return {
       pending: [],
-      applied: []
+      applied: [],
+      _error: (error as Error).message
     }
   }
 }

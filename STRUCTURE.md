@@ -5,7 +5,7 @@
 This is a **npm workspaces** monorepo with three main packages:
 
 ```
-comms-reporter-dev-tools/          # Solution root
+mcp-dev-tools/                     # Solution root
 ├── package.json                   # Workspace root config
 ├── core/                          # Core library
 │   ├── package.json              # @dev-tools/core

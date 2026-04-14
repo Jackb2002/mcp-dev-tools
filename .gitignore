@@ -29,3 +29,6 @@ build/
 .env
 .env.local
 .env.*.local
+
+# Local config (contains personal paths — copy from dev-tools.config.example.json)
+dev-tools.config.json

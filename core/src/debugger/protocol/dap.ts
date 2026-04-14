@@ -1,0 +1,569 @@
+/**
+ * Debug Adapter Protocol (DAP) Implementation
+ * Provides multi-language debugging via standardized DAP protocol
+ */
+
+import { spawn, ChildProcess } from 'child_process'
+import {
+  Breakpoint,
+  StackFrame,
+  Variable,
+  EvaluationResult,
+  Watch,
+  Unsubscribe,
+  WatcherCallback
+} from '../../types'
+import { BaseDebugAdapter } from './adapter'
+
+interface DAPRequest {
+  seq: number
+  type: 'request'
+  command: string
+  arguments?: Record<string, unknown>
+}
+
+interface DAPResponse {
+  seq: number
+  type: 'response'
+  request_seq: number
+  command: string
+  success: boolean
+  message?: string   // top-level error description per DAP spec
+  body?: Record<string, unknown>
+}
+
+interface DAPEvent {
+  seq: number
+  type: 'event'
+  event: string
+  body?: Record<string, unknown>
+}
+
+type DAPMessage = DAPRequest | DAPResponse | DAPEvent
+
+/**
+ * DAP client implementation for multi-language debugging
+ * Launches a debug adapter (vscode-debug-adapter, netcore debugger, etc)
+ * and communicates via the DAP protocol over stdin/stdout.
+ *
+ * Supports two adapter styles:
+ *  - Node.js scripts (*.js)  → spawned as `node <adapterPath>`
+ *  - Native binaries (vsdbg) → spawned directly as `<adapterPath> --interpreter=vscode`
+ *
+ * Supports two session styles controlled by launchConfig.request:
+ *  - "launch"  → starts a new process
+ *  - "attach"  → attaches to an existing process by PID
+ */
+export class DAPDebugger extends BaseDebugAdapter {
+  private debugProcess: ChildProcess | null = null
+  private messageId = 1
+  private pendingRequests = new Map<number, (response: DAPResponse) => void>()
+  private threadMap = new Map<number, string>() // threadId -> threadName
+  private listeners: Map<string, Set<Function>> = new Map()
+  private currentFrameId: number | null = null   // frame captured on last stopped event
+  private stoppedThreadId: number | null = null  // thread that triggered the last stop
+
+  constructor(
+    private adapterPath: string,
+    private launchConfig: Record<string, unknown>
+  ) {
+    super()
+  }
+
+  async start(): Promise<void> {
+    await super.start()
+
+    // Native binaries (e.g. netcoredbg) are spawned directly with --interpreter=vscode.
+    // Node.js adapter scripts are spawned via `node`.
+    const isNodeScript = this.adapterPath.endsWith('.js')
+    const [cmd, args] = isNodeScript
+      ? ['node', [this.adapterPath]]
+      : [this.adapterPath, ['--interpreter=vscode']]
+
+    this.debugProcess = spawn(cmd, args, {
+      stdio: ['pipe', 'pipe', 'pipe']
+    })
+
+    if (!this.debugProcess.stdin || !this.debugProcess.stdout) {
+      throw new Error('Failed to initialize debug adapter streams')
+    }
+
+    // Handle responses and events using proper Content-Length framing.
+    // DAP spec says \r\n but vsdbg on macOS sends \n — handle both.
+    this.debugProcess.stdout.setEncoding('utf-8')
+    let buffer = ''
+
+    this.debugProcess.stdout.on('data', (chunk: string) => {
+      buffer += chunk
+
+      while (true) {
+        const headerMatch = buffer.match(/Content-Length: (\d+)\r?\n\r?\n/)
+        if (!headerMatch) break
+
+        const contentLength = parseInt(headerMatch[1], 10)
+        const bodyStart = headerMatch.index! + headerMatch[0].length
+
+        if (buffer.length < bodyStart + contentLength) break // wait for rest
+
+        const body = buffer.substring(bodyStart, bodyStart + contentLength)
+        buffer = buffer.substring(bodyStart + contentLength)
+
+        try {
+          const message = JSON.parse(body) as DAPMessage
+          console.error('[DAP ←]', JSON.stringify(message).slice(0, 300))
+          if (message.type === 'response') {
+            this.handleResponse(message as DAPResponse)
+          } else if (message.type === 'event') {
+            this.handleEvent(message as DAPEvent)
+          } else if (message.type === 'request') {
+            this.handleIncomingRequest(message as DAPRequest)
+          }
+        } catch (e) {
+          console.error('Failed to parse DAP message:', body, e)
+        }
+      }
+    })
+
+    // Handle adapter errors
+    this.debugProcess.stderr?.on('data', (chunk: Buffer) => {
+      console.error('Debug adapter stderr:', chunk.toString())
+    })
+
+    // Subscribe to thread events BEFORE sending any requests so we don't miss events.
+    this.addEventListener('thread', (body: any) => {
+      if (body?.reason === 'started') {
+        this.threadMap.set(body.threadId, body.name ?? body.threadId.toString())
+      } else if (body?.reason === 'exited') {
+        this.threadMap.delete(body.threadId)
+      }
+    })
+
+    // When execution stops (breakpoint, pause, step), capture the top frame ID
+    // so evaluate() and getVariables() have a valid context without needing a frameId arg.
+    this.addEventListener('stopped', async (body: any) => {
+      const threadId: number = body?.threadId ?? this.getMainThreadId()
+      this.stoppedThreadId = threadId
+      // Also update thread map — stopped body includes threadId
+      if (!this.threadMap.has(threadId)) {
+        this.threadMap.set(threadId, `Thread ${threadId}`)
+      }
+      try {
+        const resp = await this.sendRequest('stackTrace', { threadId, startFrame: 0, levels: 1 })
+        const frames = (resp.body as any)?.stackFrames ?? []
+        this.currentFrameId = frames[0]?.id ?? null
+        console.error(`[DAP] Stopped — thread ${threadId}, frame ${this.currentFrameId}, reason: ${body?.reason}`)
+      } catch (e) {
+        console.error('[DAP] Failed to capture frame on stopped event:', (e as Error).message)
+      }
+    })
+
+    // Step 1: initialize — wait for response AND the 'initialized' event.
+    // The initialized event signals the adapter is ready for setBreakpoints / attach.
+    const initializedPromise = this.waitForEvent('initialized', 5000)
+    await this.sendRequest('initialize', {
+      adapterID: 'coreclr',
+      clientID: 'dev-tools',
+      clientName: 'Dev Tools',
+      linesStartAt1: true,
+      columnsStartAt1: true,
+      pathFormat: 'path',
+      supportsVariableType: true,
+      supportsVariablePaging: true,
+      supportsRunInTerminalRequest: false,
+      supportsMemoryReferences: true,
+      supportsProgressReporting: true,
+      supportsInvalidatedEvent: true
+    })
+    // Wait for initialized event (non-fatal if adapter doesn't send it)
+    await initializedPromise.catch((e: Error) =>
+      console.error('[DAP] No initialized event (non-fatal):', e.message)
+    )
+
+    // Step 2: attach or launch
+    const sessionType = (this.launchConfig.request as string) === 'attach' ? 'attach' : 'launch'
+    await this.sendRequest(sessionType, this.launchConfig)
+
+    // Step 3: configurationDone — non-fatal if another debugger is already attached
+    try {
+      await this.sendRequest('configurationDone', {})
+    } catch (e) {
+      console.error('[DAP] configurationDone non-fatal:', (e as Error).message)
+    }
+
+    // Step 4: wait for the adapter to finish attaching to the CLR.
+    // netcoredbg sends 'process' + 'thread' events as it enumerates the attached process.
+    // Wait up to 3s for at least one thread event before seeding the thread map.
+    await this.waitForEvent('thread', 3000).catch(() => {
+      console.error('[DAP] No thread events received after attach — threads may be empty')
+    })
+
+    // Seed the thread map from a live 'threads' request to catch any threads that
+    // arrived before our listener was wired, or if no events fired.
+    try {
+      const threadsResp = await this.sendRequest('threads', {})
+      const threads = (threadsResp.body as any)?.threads || []
+      for (const t of threads) {
+        this.threadMap.set(t.id, t.name ?? t.id.toString())
+      }
+      console.error(`[DAP] Thread map: ${[...this.threadMap.entries()].map(([id, name]) => `${id}=${name}`).join(', ')}`)
+    } catch (e) {
+      console.error('[DAP] threads request non-fatal:', (e as Error).message)
+    }
+  }
+
+  // Handle reverse requests sent by vsdbg (e.g. the security handshake)
+  private handleIncomingRequest(req: DAPRequest): void {
+    if (req.command === 'handshake') {
+      // vsdbg sends a Microsoft-specific security challenge during init.
+      // For local stdio sessions the response value is not validated,
+      // so respond with an empty string to unblock the adapter.
+      this.sendHandshakeResponse(req.seq)
+    }
+  }
+
+  private sendHandshakeResponse(requestSeq: number): void {
+    const stdin = this.debugProcess?.stdin
+    if (!stdin) return
+    const body = JSON.stringify({
+      seq: this.messageId++,
+      type: 'response',
+      request_seq: requestSeq,
+      success: true,
+      command: 'handshake',
+      body: { value: '' }
+    })
+    stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
+  }
+
+  async stop(): Promise<void> {
+    if (this.debugProcess) {
+      await this.sendRequest('terminate', {})
+      this.debugProcess.kill()
+      this.debugProcess = null
+    }
+    await super.stop()
+  }
+
+  async setBreakpoint(file: string, line: number): Promise<Breakpoint> {
+    const response = await this.sendRequest('setBreakpoints', {
+      source: { path: file },
+      breakpoints: [{ line }],
+      sourceModified: false
+    })
+
+    const breakpoints = (response.body as any)?.breakpoints || []
+    if (breakpoints.length === 0) {
+      throw new Error(`Failed to set breakpoint at ${file}:${line}`)
+    }
+
+    const bp = breakpoints[0]
+    const id = `${file}:${line}`
+    const breakpoint: Breakpoint = {
+      id,
+      file,
+      line: bp.line || line,
+      verified: bp.verified || false
+    }
+
+    this.breakpoints.set(id, breakpoint)
+    return breakpoint
+  }
+
+  async clearBreakpoint(id: string): Promise<void> {
+    const bp = this.breakpoints.get(id)
+    if (!bp) return
+
+    await this.sendRequest('setBreakpoints', {
+      source: { path: bp.file },
+      breakpoints: [],
+      sourceModified: false
+    })
+
+    this.breakpoints.delete(id)
+  }
+
+  async continue(): Promise<void> {
+    await this.sendRequest('continue', {
+      threadId: this.getMainThreadId()
+    })
+  }
+
+  async pause(): Promise<void> {
+    await this.sendRequest('pause', {
+      threadId: this.getMainThreadId()
+    })
+  }
+
+  async stepOver(): Promise<void> {
+    await this.sendRequest('next', {
+      threadId: this.getMainThreadId()
+    })
+  }
+
+  async stepInto(): Promise<void> {
+    await this.sendRequest('stepIn', {
+      threadId: this.getMainThreadId()
+    })
+  }
+
+  async stepOut(): Promise<void> {
+    await this.sendRequest('stepOut', {
+      threadId: this.getMainThreadId()
+    })
+  }
+
+  async getStackTrace(threadId?: number): Promise<StackFrame[]> {
+    threadId = threadId || this.getMainThreadId()
+
+    const response = await this.sendRequest('stackTrace', {
+      threadId,
+      startFrame: 0,
+      levels: 20
+    })
+
+    const frames = (response.body as any)?.stackFrames || []
+    return frames.map((f: any) => ({
+      id: f.id,
+      name: f.name,
+      file: f.source?.path || '',
+      line: f.line || 0,
+      column: f.column || 0
+    }))
+  }
+
+  async getVariables(frameId: number): Promise<Variable[]> {
+    const response = await this.sendRequest('scopes', {
+      frameId
+    })
+
+    const scopes = (response.body as any)?.scopes || []
+    if (scopes.length === 0) return []
+
+    // Get variables from local scope
+    const varsResponse = await this.sendRequest('variables', {
+      variablesReference: scopes[0].variablesReference
+    })
+
+    const variables = (varsResponse.body as any)?.variables || []
+    return variables.map((v: any) => ({
+      name: v.name,
+      value: v.value,
+      type: v.type,
+      variablesReference: v.variablesReference || 0
+    }))
+  }
+
+  async evaluate(expr: string, frameId?: number): Promise<EvaluationResult> {
+    // Use caller-supplied frameId, then the auto-captured frame, then 0 as last resort
+    const resolvedFrameId = frameId ?? this.currentFrameId ?? 0
+    const response = await this.sendRequest('evaluate', {
+      expression: expr,
+      frameId: resolvedFrameId,
+      context: 'watch'
+    })
+
+    const body = response.body as any
+    return {
+      value: body.result,
+      type: body.type,
+      variablesReference: body.variablesReference || 0
+    }
+  }
+
+  async addWatch(expr: string): Promise<Watch> {
+    const id = `watch-${Date.now()}`
+    const watch: Watch = {
+      id,
+      expr,
+      value: '<pending>'
+    }
+
+    this.watches.set(id, watch)
+
+    // Evaluate immediately
+    try {
+      const result = await this.evaluate(expr)
+      watch.value = result.value
+    } catch (e) {
+      watch.value = '<error>'
+    }
+
+    return watch
+  }
+
+  async removeWatch(id: string): Promise<void> {
+    this.watches.delete(id)
+  }
+
+  onBreakpoint(callback: WatcherCallback<StackFrame>): Unsubscribe {
+    return this.addEventListener('stopped', (event: any) => {
+      // Parse stopped event and get current stack frame
+      if (event.reason === 'breakpoint') {
+        // In a real implementation, fetch and pass actual stack frame
+        callback({
+          id: 0,
+          name: '<breakpoint>',
+          file: '',
+          line: 0
+        })
+      }
+    })
+  }
+
+  onPaused(callback: WatcherCallback<StackFrame>): Unsubscribe {
+    return this.addEventListener('stopped', (_event: any) => {
+      callback({
+        id: 0,
+        name: '<paused>',
+        file: '',
+        line: 0
+      })
+    })
+  }
+
+  onContinued(callback: () => void): Unsubscribe {
+    return this.addEventListener('continued', callback)
+  }
+
+  onTerminated(callback: () => void): Unsubscribe {
+    return this.addEventListener('terminated', callback)
+  }
+
+  // Private helpers
+
+  private async sendRequest(
+    command: string,
+    args?: Record<string, unknown>
+  ): Promise<DAPResponse> {
+    const stdin = this.debugProcess?.stdin
+    if (!stdin) {
+      throw new Error('Debug adapter not running')
+    }
+
+    const seq = this.messageId++
+    const message: DAPRequest = {
+      seq,
+      type: 'request',
+      command,
+      arguments: args
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(seq)
+        reject(new Error(`DAP request ${command} timed out`))
+      }, 5000)
+
+      this.pendingRequests.set(seq, (response) => {
+        clearTimeout(timeout)
+        if (response.success) {
+          resolve(response)
+        } else {
+          const msg = response.message
+            ?? (response.body as any)?.message
+            ?? (response.body as any)?.error?.message
+            ?? JSON.stringify(response.body)
+            ?? 'no details'
+          reject(new Error(`DAP request ${command} failed: ${msg}`))
+        }
+      })
+
+      const content = JSON.stringify(message)
+      console.error('[DAP →]', JSON.stringify(message).slice(0, 300))
+      const header = `Content-Length: ${Buffer.byteLength(content)}\r\n\r\n`
+      stdin.write(header + content)
+    })
+  }
+
+  private handleResponse(response: DAPResponse): void {
+    const handler = this.pendingRequests.get(response.request_seq)
+    if (handler) {
+      this.pendingRequests.delete(response.request_seq)
+      handler(response)
+    }
+  }
+
+  private handleEvent(event: DAPEvent): void {
+    const listeners = this.listeners.get(event.event) || new Set()
+    listeners.forEach((callback) => {
+      try {
+        callback(event.body)
+      } catch (e) {
+        console.error('Error in event listener:', e)
+      }
+    })
+  }
+
+  private addEventListener(
+    eventName: string,
+    callback: Function
+  ): Unsubscribe {
+    if (!this.listeners.has(eventName)) {
+      this.listeners.set(eventName, new Set())
+    }
+
+    this.listeners.get(eventName)!.add(callback)
+
+    return () => {
+      const listeners = this.listeners.get(eventName)
+      if (listeners) {
+        listeners.delete(callback)
+      }
+    }
+  }
+
+  /** Wait for a named DAP event, resolving with the event body. Rejects after timeoutMs. */
+  private waitForEvent(eventName: string, timeoutMs: number): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        unsub()
+        reject(new Error(`Timed out waiting for '${eventName}' event`))
+      }, timeoutMs)
+
+      const unsub = this.addEventListener(eventName, (body: unknown) => {
+        clearTimeout(timer)
+        unsub()
+        resolve(body)
+      })
+    })
+  }
+
+  private getMainThreadId(): number {
+    return this.threadMap.size > 0 ? Array.from(this.threadMap.keys())[0] : 1
+  }
+
+  /** List all live threads from the adapter */
+  async listThreads(): Promise<Array<{ id: number; name: string }>> {
+    const resp = await this.sendRequest('threads', {})
+    const threads = (resp.body as any)?.threads || []
+    // Keep threadMap in sync
+    this.threadMap.clear()
+    for (const t of threads) {
+      this.threadMap.set(t.id, t.name ?? t.id.toString())
+    }
+    return threads.map((t: any) => ({ id: t.id, name: t.name ?? `Thread ${t.id}` }))
+  }
+
+  /** List source files the adapter has loaded (useful for diagnosing breakpoint path mismatches) */
+  async getLoadedSources(): Promise<Array<{ name: string; path: string }>> {
+    const resp = await this.sendRequest('loadedSources', {})
+    const sources = (resp.body as any)?.sources || []
+    return sources.map((s: any) => ({ name: s.name ?? '', path: s.path ?? '' }))
+  }
+
+  /** Full stack trace for a thread (defaults to the stopped thread or main thread) */
+  async getFullStackTrace(threadId?: number): Promise<StackFrame[]> {
+    const tid = threadId ?? this.stoppedThreadId ?? this.getMainThreadId()
+    return this.getStackTrace(tid)
+  }
+
+  /** Current stopped state */
+  getStoppedContext(): { threadId: number | null; frameId: number | null } {
+    return { threadId: this.stoppedThreadId, frameId: this.currentFrameId }
+  }
+
+  /** Diagnostic: returns a copy of the current thread map */
+  getThreadMap(): Map<number, string> {
+    return new Map(this.threadMap)
+  }
+}

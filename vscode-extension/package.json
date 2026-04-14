@@ -1,0 +1,88 @@
+{
+  "name": "dev-tools-vscode",
+  "displayName": "Development Tools",
+  "description": "Real-time dev insights: builds, git, disk usage, app health, database, and debugging",
+  "version": "0.1.0",
+  "publisher": "dev-tools",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Debuggers"
+  ],
+  "keywords": [
+    "development",
+    "tools",
+    "debugging",
+    "git",
+    "build"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "devTools.showGitPanel",
+        "title": "Dev Tools: Show Git Status"
+      },
+      {
+        "command": "devTools.showBuildPanel",
+        "title": "Dev Tools: Show Recent Builds"
+      },
+      {
+        "command": "devTools.showHealthPanel",
+        "title": "Dev Tools: Show App Health"
+      },
+      {
+        "command": "devTools.showDiskPanel",
+        "title": "Dev Tools: Show Disk Usage"
+      },
+      {
+        "command": "devTools.showDatabasePanel",
+        "title": "Dev Tools: Show Database Info"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "devToolsGit",
+          "name": "Git Status",
+          "when": "devTools.initialized"
+        },
+        {
+          "id": "devToolsHealth",
+          "name": "App Health",
+          "when": "devTools.initialized"
+        },
+        {
+          "id": "devToolsBuild",
+          "name": "Recent Builds",
+          "when": "devTools.initialized"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "package": "vsce package",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.3",
+    "vsce": "^2.15.0",
+    "@vscode/vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "@dev-tools/core": "*"
+  }
+}

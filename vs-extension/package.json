@@ -1,6 +1,16 @@
 {
   "name": "@dev-tools/vs-extension",
   "version": "0.1.0",
-  "description": "Visual Studio extension for development tools",
-  "private": true
+  "description": "Visual Studio 2022 extension for development tools",
+  "private": true,
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@dev-tools/core": "*"
+  }
 }

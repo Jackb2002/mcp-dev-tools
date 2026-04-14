@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <Identity Id="dev-tools-extension.DevTools" Version="0.1.0" Language="en-US" Publisher="dev-tools" />
+    <DisplayName>Development Tools</DisplayName>
+    <Description>Real-time development insights: build logs, git status, disk usage, app health, database info, and interactive debugging</Description>
+    <MoreInfo>https://github.com/dev-tools/mcp-dev-tools</MoreInfo>
+    <License>LICENSE.txt</License>
+    <ReleaseNotes>Initial preview release with core development tools panels</ReleaseNotes>
+    <Icon>Resources/Extension.ico</Icon>
+    <PreviewImage>Resources/Preview.png</PreviewImage>
+    <Tags>development;tools;debugging;git;build;visual-studio</Tags>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0, 18.0)" />
+    <InstallationTarget Id="Microsoft.VisualStudio.Pro" Version="[17.0, 18.0)" />
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[17.0, 18.0)" />
+  </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.VisualStudio.MPF" Version="[17.0,18.0)" />
+  </Dependencies>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+  </Assets>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.0,18.0)" DisplayName="Visual Studio core editor" />
+  </Prerequisites>
+</PackageManifest>

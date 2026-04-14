@@ -56,21 +56,21 @@ export async function getHealth(appPort?: number): Promise<Health> {
   let pid: number | undefined
   let uptime: string | undefined
   let memory: string | undefined
+  let error: string | undefined
 
   try {
-    // macOS/Linux: lsof -i :PORT
-    const output = execSafe(`lsof -i :${port}`, undefined)
+    // macOS/Linux: restrict to LISTEN state so we get the server process,
+    // not a browser or other client that happens to be connected to the port.
+    const output = execSafe(`lsof -i TCP:${port} -sTCP:LISTEN -t`, undefined)
     if (output.exitCode === 0) {
-      const lines = output.stdout.split('\n')
-      if (lines.length > 1) {
-        const parts = lines[1].split(/\s+/)
-        if (parts.length > 1) {
-          pid = parseInt(parts[1], 10)
-        }
+      const raw = output.stdout.trim()
+      if (raw) {
+        pid = parseInt(raw.split('\n')[0], 10)
       }
     }
-  } catch {
-    // Fallback - just mark as running
+  } catch (err) {
+    // Fallback - just mark as running but record error
+    error = `Failed to get PID: ${(err as Error).message}`
   }
 
   // Try to get memory usage
@@ -89,8 +89,8 @@ export async function getHealth(appPort?: number): Promise<Health> {
           }
         }
       }
-    } catch {
-      // Ignore
+    } catch (err) {
+      // Ignore process info retrieval errors - app is still running
     }
   }
 
@@ -99,7 +99,8 @@ export async function getHealth(appPort?: number): Promise<Health> {
     pid,
     uptime,
     memory,
-    ports: [port]
+    ports: [port],
+    ...(error && { _error: error })
   }
 }
 
