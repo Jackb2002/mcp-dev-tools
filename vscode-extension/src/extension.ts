@@ -23,8 +23,25 @@ let debugBridgeServer: http.Server | null = null
 // Track breakpoints per file so setBreakpoints merges rather than replaces
 const breakpointMap = new Map<string, Set<number>>()
 
-function startDebugBridge(): void {
+// Track the currently stopped thread and top frame from DAP stopped events
+let stoppedThreadId: number | null = null
+let stoppedFrameId: number | null = null
+
+function startDebugBridge(context: vscode.ExtensionContext): void {
   if (debugBridgeServer) return
+
+  // Listen for DAP stopped/continued events to track the paused thread
+  context.subscriptions.push(
+    vscode.debug.onDidReceiveDebugSessionCustomEvent(e => {
+      if (e.event === 'stopped') {
+        stoppedThreadId = (e.body as { threadId?: number })?.threadId ?? null
+        stoppedFrameId = null // will be resolved on first stackTrace call
+      } else if (e.event === 'continued') {
+        stoppedThreadId = null
+        stoppedFrameId = null
+      }
+    })
+  )
 
   debugBridgeServer = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.setHeader('Content-Type', 'application/json')
@@ -50,6 +67,12 @@ function startDebugBridge(): void {
           return
         }
 
+        if (req.url === '/stoppedThread') {
+          res.writeHead(200)
+          res.end(JSON.stringify({ threadId: stoppedThreadId, frameId: stoppedFrameId }))
+          return
+        }
+
         if (req.url === '/status') {
           res.writeHead(200)
           res.end(JSON.stringify({
@@ -69,11 +92,16 @@ function startDebugBridge(): void {
         }
 
         if (req.url === '/stackTrace') {
+          const threadId = args.threadId ?? stoppedThreadId ?? 1
           const result = await session.customRequest('stackTrace', {
-            threadId: args.threadId ?? 1,
+            threadId,
             startFrame: 0,
             levels: args.levels ?? 20
           })
+          // Cache top user frame for evaluate/scopes default
+          const frames = (result as { stackFrames?: Array<{ id: number; presentationHint?: string }> }).stackFrames ?? []
+          const topFrame = frames.find(f => f.presentationHint !== 'subtle')
+          if (topFrame) stoppedFrameId = topFrame.id
           res.writeHead(200)
           res.end(JSON.stringify(result))
           return
@@ -82,7 +110,7 @@ function startDebugBridge(): void {
         if (req.url === '/evaluate') {
           const result = await session.customRequest('evaluate', {
             expression: args.expression,
-            frameId: args.frameId,
+            frameId: args.frameId ?? stoppedFrameId,
             context: args.context ?? 'watch'
           })
           res.writeHead(200)
@@ -91,7 +119,7 @@ function startDebugBridge(): void {
         }
 
         if (req.url === '/scopes') {
-          const result = await session.customRequest('scopes', { frameId: args.frameId })
+          const result = await session.customRequest('scopes', { frameId: args.frameId ?? stoppedFrameId })
           res.writeHead(200)
           res.end(JSON.stringify(result))
           return
@@ -236,7 +264,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     startWatchers()
 
     // Start debug bridge so MCP tools can use the active VS Code debug session
-    startDebugBridge()
+    startDebugBridge(context)
     context.subscriptions.push({
       dispose: () => {
         if (debugBridgeServer) {

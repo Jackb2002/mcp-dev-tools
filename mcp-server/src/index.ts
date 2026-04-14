@@ -552,11 +552,11 @@ function initializeTools(): void {
   // Stack trace
   tools.push({
     name: 'debugger_stack_trace',
-    description: 'Get call stack from the VS Code debug session (requires paused execution)',
+    description: 'Get call stack from the VS Code debug session (requires paused execution). Omit threadId to use the currently stopped thread automatically.',
     inputSchema: {
       type: 'object',
       properties: {
-        threadId: { type: 'number', description: 'Thread ID (optional)' },
+        threadId: { type: 'number', description: 'Thread ID — omit to use stopped thread automatically' },
         levels: { type: 'number', description: 'Max frames to return (default 20)' }
       }
     },
@@ -574,13 +574,12 @@ function initializeTools(): void {
   // Variables
   tools.push({
     name: 'debugger_variables',
-    description: 'Get local variables for a stack frame (requires paused execution)',
+    description: 'Get local variables for a stack frame (requires paused execution). Omit frameId to use the top frame of the stopped thread automatically.',
     inputSchema: {
       type: 'object',
       properties: {
-        frameId: { type: 'number', description: 'Frame ID from stack trace' }
-      },
-      required: ['frameId']
+        frameId: { type: 'number', description: 'Frame ID from stack trace — omit to use top stopped frame automatically' }
+      }
     },
     handler: async (args) => {
       try {
