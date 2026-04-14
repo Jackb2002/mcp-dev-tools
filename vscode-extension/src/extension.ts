@@ -184,8 +184,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   try {
     console.log('[Dev Tools] VS Code extension activating...')
 
-    // Load configuration
-    const configManager = CoreLib.getConfigManager()
+    // Load configuration — pass workspace root so config is found next to the project
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()
+    const configManager = CoreLib.getConfigManager(workspaceRoot)
     config = configManager.getConfig()
 
     // Set context flags for conditional UI
